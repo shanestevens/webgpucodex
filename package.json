@@ -4,9 +4,9 @@
   "version": "0.0.0",
   "description": "Interactive Three.js WebGPU learning gallery",
   "scripts": {
-    "dev": "$repo = (Get-Location).ProviderPath; if ($repo.StartsWith('\\\\?\\')) { $repo = $repo.Substring(4) }; $repo = [System.IO.Path]::GetFullPath($repo); Set-Location -LiteralPath $repo; node (Join-Path $repo 'node_modules/vite/bin/vite.js')",
-    "build": "$repo = (Get-Location).ProviderPath; if ($repo.StartsWith('\\\\?\\')) { $repo = $repo.Substring(4) }; $repo = [System.IO.Path]::GetFullPath($repo); Set-Location -LiteralPath $repo; node (Join-Path $repo 'node_modules/typescript/bin/tsc'); if ($LASTEXITCODE -eq 0) { node (Join-Path $repo 'node_modules/vite/bin/vite.js') build } else { exit $LASTEXITCODE }",
-    "preview": "$repo = (Get-Location).ProviderPath; if ($repo.StartsWith('\\\\?\\')) { $repo = $repo.Substring(4) }; $repo = [System.IO.Path]::GetFullPath($repo); Set-Location -LiteralPath $repo; node (Join-Path $repo 'node_modules/vite/bin/vite.js') preview"
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
   },
   "keywords": [
     "threejs",
