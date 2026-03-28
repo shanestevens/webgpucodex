@@ -495,6 +495,7 @@ class ExampleCameraRig {
   private orbitDistance = 6;
   private readonly keys = new Set<string>();
   private readonly touchPoints = new Map<number, THREE.Vector2>();
+  private readonly touchCenter = new THREE.Vector2();
   private pinchDistance = 0;
   mode: CameraMode;
 
@@ -669,6 +670,21 @@ class ExampleCameraRig {
     return points[0].distanceTo(points[1]);
   }
 
+  private getTouchCenter(): THREE.Vector2 {
+    this.touchCenter.set(0, 0);
+
+    if (this.touchPoints.size === 0) {
+      return this.touchCenter;
+    }
+
+    for (const point of this.touchPoints.values()) {
+      this.touchCenter.add(point);
+    }
+
+    this.touchCenter.multiplyScalar(1 / this.touchPoints.size);
+    return this.touchCenter;
+  }
+
   private handleContextMenu = (event: MouseEvent): void => {
     event.preventDefault();
   };
@@ -677,6 +693,10 @@ class ExampleCameraRig {
     this.domElement.focus();
 
     if (event.pointerType === "touch") {
+      if (this.mode === "fps") {
+        event.preventDefault();
+      }
+
       this.touchPoints.set(event.pointerId, new THREE.Vector2(event.clientX, event.clientY));
 
       if (this.touchPoints.size >= 2) {
@@ -705,7 +725,19 @@ class ExampleCameraRig {
 
   private handlePointerMove = (event: PointerEvent): void => {
     if (event.pointerType === "touch" && this.touchPoints.has(event.pointerId)) {
+      const previousPoint = this.touchPoints.get(event.pointerId)?.clone();
+      const previousCenter = this.getTouchCenter().clone();
       this.touchPoints.get(event.pointerId)?.set(event.clientX, event.clientY);
+      const nextCenter = this.getTouchCenter().clone();
+
+      if (this.mode === "fps" && previousPoint) {
+        event.preventDefault();
+
+        if (this.touchPoints.size === 1) {
+          this.rotateCamera(event.clientX - previousPoint.x, event.clientY - previousPoint.y);
+          return;
+        }
+      }
 
       if (this.touchPoints.size >= 2) {
         const nextDistance = this.getTouchDistance();
@@ -715,6 +747,10 @@ class ExampleCameraRig {
         }
 
         this.pinchDistance = nextDistance;
+
+        if (this.mode === "fps") {
+          this.panCamera(nextCenter.x - previousCenter.x, nextCenter.y - previousCenter.y);
+        }
       }
 
       return;
