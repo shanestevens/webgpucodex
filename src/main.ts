@@ -7,7 +7,7 @@ import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import GUI from "three/addons/libs/lil-gui.module.min.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { SimplexNoise } from "three/addons/math/SimplexNoise.js";
-import { Fn, color, cos, instanceIndex, instancedArray, localId, mix, normalLocal, positionLocal, sin, textureStore, time, uvec2, uv, vec3, vec4, workgroupId } from "three/tsl";
+import { Fn, color, cos, instanceIndex, instancedArray, localId, mix, normalLocal, positionLocal, sin, textureStore, time, uniform, uvec2, uv, vec3, vec4, workgroupId } from "three/tsl";
 
 type CameraMode = "orbit" | "fps";
 
@@ -61,7 +61,7 @@ type MountedExample = ExampleRuntime & {
   scene: THREE.Scene;
   renderer: THREE.WebGPURenderer;
   controls: OrbitControls;
-  resizeObserver: ResizeObserver;
+  handleWindowResize: () => void;
   guiFieldObserver: MutationObserver;
   cameraRig: ExampleCameraRig;
   gui: GUI;
@@ -69,6 +69,10 @@ type MountedExample = ExampleRuntime & {
   fpsLabel: HTMLDivElement;
   fpsSmoothed: number;
   failed: boolean;
+  sizeDirty: boolean;
+  viewportWidth: number;
+  viewportHeight: number;
+  syncSize: () => void;
 };
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -1193,132 +1197,11 @@ const examples: ExampleDefinition[] = [
   },
   {
     step: "Step 04",
-    title: "Lighting Fundamentals",
-    summary: "Start with a compact PBR setup so you can see how a few common lights sculpt the same materials.",
+    title: "Lighting Studio",
+    summary: "Use one PBR scene and a preset dropdown to isolate ambient, hemisphere, directional, point, and spot lighting without jumping to a second card.",
     notes:
-      "This is the first place roughness, metalness, specular highlights, and shadows start talking to each other. Use the IMGUI to solo the major contributors.",
-    tags: ["MeshStandardMaterial", "Shadows", "PBR lighting"],
-    cameraPosition: [5.5, 3.2, 6.5],
-    target: [0, 1, 0],
-    create: ({ scene }) => {
-      scene.background = new THREE.Color("#091523");
-
-      const floor = new THREE.Mesh(
-        new THREE.PlaneGeometry(16, 16),
-        new THREE.MeshStandardMaterial({
-          color: "#13273a",
-          roughness: 0.94,
-          metalness: 0.04,
-        }),
-      );
-      floor.rotation.x = -Math.PI / 2;
-      floor.receiveShadow = true;
-      scene.add(floor);
-
-      const knot = new THREE.Mesh(
-        new THREE.TorusKnotGeometry(1.05, 0.34, 168, 24),
-        new THREE.MeshStandardMaterial({
-          color: "#69d8ff",
-          roughness: 0.22,
-          metalness: 0.55,
-        }),
-      );
-      knot.castShadow = true;
-      knot.position.set(-1.15, 1.7, 0);
-
-      const sphere = new THREE.Mesh(
-        new THREE.SphereGeometry(0.95, 48, 32),
-        new THREE.MeshStandardMaterial({
-          color: "#ffb15f",
-          roughness: 0.58,
-          metalness: 0.12,
-        }),
-      );
-      sphere.castShadow = true;
-      sphere.position.set(1.55, 1.1, -0.4);
-
-      const ambient = new THREE.AmbientLight("#8ab8ff", 0.35);
-      const hemi = new THREE.HemisphereLight("#82b1ff", "#08111d", 0.8);
-      const sun = new THREE.DirectionalLight("#ffffff", 1.8);
-      sun.position.set(4.5, 6.5, 2.5);
-      sun.castShadow = true;
-      sun.shadow.mapSize.set(1024, 1024);
-
-      const point = new THREE.PointLight("#ff8f6a", 35, 16, 2);
-      point.castShadow = true;
-
-      const pointMesh = new THREE.Mesh(
-        new THREE.SphereGeometry(0.14, 16, 16),
-        new THREE.MeshBasicMaterial({ color: "#ffd4ba" }),
-      );
-      point.add(pointMesh);
-
-      const pointRig = new THREE.Group();
-      pointRig.add(point);
-      point.position.set(2.2, 2.5, 0);
-
-      scene.add(ambient, hemi, sun, pointRig, knot, sphere);
-
-      const controlsState = {
-        ambient: ambient.intensity,
-        hemisphere: hemi.intensity,
-        sun: sun.intensity,
-        point: point.intensity,
-        animate: true,
-      };
-
-      return {
-        update: (elapsed) => {
-          if (!controlsState.animate) {
-            return;
-          }
-
-          knot.rotation.x = elapsed * 0.4;
-          knot.rotation.y = elapsed * 0.65;
-          sphere.position.y = 1.1 + Math.sin(elapsed * 1.2) * 0.18;
-          pointRig.rotation.y = elapsed * 0.8;
-        },
-        setupGui: ({ gui }) => {
-          const folder = gui.addFolder("Lighting");
-          folder
-            .add(controlsState, "ambient", 0, 1.5, 0.01)
-            .name("ambient")
-            .onChange((value: number) => {
-              ambient.intensity = value;
-            });
-          folder
-            .add(controlsState, "hemisphere", 0, 2, 0.01)
-            .name("hemisphere")
-            .onChange((value: number) => {
-              hemi.intensity = value;
-            });
-          folder
-            .add(controlsState, "sun", 0, 4, 0.01)
-            .name("directional")
-            .onChange((value: number) => {
-              sun.intensity = value;
-            });
-          folder
-            .add(controlsState, "point", 0, 60, 0.1)
-            .name("point")
-            .onChange((value: number) => {
-              point.intensity = value;
-            });
-          folder.add(controlsState, "animate").name("animate");
-        },
-        dispose: () => {
-          disposeSceneResources([floor, knot, sphere, pointMesh]);
-        },
-      };
-    },
-  },
-  {
-    step: "Step 04B",
-    title: "Light Types Studio",
-    summary: "Layer ambient, hemisphere, directional, point, and spot lights so you can feel what each one adds.",
-    notes:
-      "This is the comparison lab. Toggle lights individually, turn on helpers, and watch how some lights fill globally while others create direction, falloff, and theatrical focus.",
-    tags: ["AmbientLight", "SpotLight", "Helpers"],
+      "This is the first place roughness, metalness, specular highlights, and shadows really start talking to each other. Flip the setup dropdown to solo each light type, then turn helpers on to see why the shading changes.",
+    tags: ["Light presets", "MeshStandardMaterial", "Helpers"],
     cameraPosition: [8.2, 4.5, 7.4],
     target: [0, 1.4, 0],
     create: ({ scene }) => {
@@ -1348,6 +1231,7 @@ const examples: ExampleDefinition[] = [
       pedestal.castShadow = true;
 
       const heroGroup = new THREE.Group();
+
       const knot = new THREE.Mesh(
         new THREE.TorusKnotGeometry(0.86, 0.28, 168, 24),
         new THREE.MeshStandardMaterial({
@@ -1395,7 +1279,6 @@ const examples: ExampleDefinition[] = [
       directional.shadow.camera.bottom = -5;
 
       const point = new THREE.PointLight("#ff8c6c", 22, 14, 2);
-      point.position.set(0, 2.7, 0);
       point.castShadow = true;
 
       const pointOrb = new THREE.Mesh(
@@ -1403,6 +1286,10 @@ const examples: ExampleDefinition[] = [
         new THREE.MeshBasicMaterial({ color: "#ffd0c0" }),
       );
       point.add(pointOrb);
+
+      const pointRig = new THREE.Group();
+      pointRig.add(point);
+      point.position.set(2.8, 2.8, 0);
 
       const spot = new THREE.SpotLight("#7ad6ff", 26, 18, Math.PI / 7, 0.36, 1.2);
       spot.position.set(-4.8, 5.8, 4.4);
@@ -1412,18 +1299,14 @@ const examples: ExampleDefinition[] = [
       spot.castShadow = true;
       spot.shadow.mapSize.set(1024, 1024);
 
-      const ambientHelper = new THREE.HemisphereLightHelper(hemi, 0.65);
+      const hemisphereHelper = new THREE.HemisphereLightHelper(hemi, 0.65);
       const directionalHelper = new THREE.DirectionalLightHelper(directional, 0.85, "#ffe2ba");
       const pointHelper = new THREE.PointLightHelper(point, 0.34, "#ffbba5");
       const spotHelper = new THREE.SpotLightHelper(spot, "#89ddff");
-      ambientHelper.visible = false;
+      hemisphereHelper.visible = false;
       directionalHelper.visible = false;
       pointHelper.visible = false;
       spotHelper.visible = false;
-
-      const pointRig = new THREE.Group();
-      pointRig.add(point);
-      point.position.set(2.8, 2.8, 0);
 
       scene.add(
         floor,
@@ -1435,73 +1318,161 @@ const examples: ExampleDefinition[] = [
         pointRig,
         spot,
         spotlightTarget,
-        ambientHelper,
+        hemisphereHelper,
         directionalHelper,
         pointHelper,
         spotHelper,
       );
 
+      const lightPresets = {
+        balanced: {
+          ambient: true,
+          hemisphere: true,
+          directional: true,
+          point: true,
+          spot: false,
+        },
+        ambient: {
+          ambient: true,
+          hemisphere: false,
+          directional: false,
+          point: false,
+          spot: false,
+        },
+        hemisphere: {
+          ambient: false,
+          hemisphere: true,
+          directional: false,
+          point: false,
+          spot: false,
+        },
+        directional: {
+          ambient: false,
+          hemisphere: false,
+          directional: true,
+          point: false,
+          spot: false,
+        },
+        point: {
+          ambient: false,
+          hemisphere: false,
+          directional: false,
+          point: true,
+          spot: false,
+        },
+        spot: {
+          ambient: false,
+          hemisphere: false,
+          directional: false,
+          point: false,
+          spot: true,
+        },
+        full: {
+          ambient: true,
+          hemisphere: true,
+          directional: true,
+          point: true,
+          spot: true,
+        },
+      } as const;
+
       const state = {
-        ambient: true,
-        hemisphere: true,
-        directional: true,
-        point: true,
-        spot: true,
-        showHelpers: false,
-        rotateDisplay: true,
+        preset: "balanced" as keyof typeof lightPresets,
+        ambient: ambient.intensity,
+        hemisphere: hemi.intensity,
+        directional: directional.intensity,
+        point: point.intensity,
+        spot: spot.intensity,
+        helpers: false,
+        animate: true,
       };
 
       const syncLighting = () => {
-        ambient.visible = state.ambient;
-        hemi.visible = state.hemisphere;
-        directional.visible = state.directional;
-        point.visible = state.point;
-        spot.visible = state.spot;
-        ambientHelper.visible = state.showHelpers && state.hemisphere;
-        directionalHelper.visible = state.showHelpers && state.directional;
-        pointHelper.visible = state.showHelpers && state.point;
-        spotHelper.visible = state.showHelpers && state.spot;
+        const preset = lightPresets[state.preset];
+        ambient.intensity = state.ambient;
+        hemi.intensity = state.hemisphere;
+        directional.intensity = state.directional;
+        point.intensity = state.point;
+        spot.intensity = state.spot;
+
+        ambient.visible = preset.ambient;
+        hemi.visible = preset.hemisphere;
+        directional.visible = preset.directional;
+        point.visible = preset.point;
+        spot.visible = preset.spot;
+        hemisphereHelper.visible = state.helpers && preset.hemisphere;
+        directionalHelper.visible = state.helpers && preset.directional;
+        pointHelper.visible = state.helpers && preset.point;
+        spotHelper.visible = state.helpers && preset.spot;
       };
 
       syncLighting();
 
       return {
         update: (elapsed) => {
-          if (state.rotateDisplay) {
+          if (state.animate) {
             heroGroup.rotation.y = elapsed * 0.22;
+            pointRig.rotation.y = elapsed * 0.58;
+            point.position.y = 2.35 + Math.sin(elapsed * 1.3) * 0.55;
+            spot.position.x = Math.cos(elapsed * 0.36) * 5.2;
+            spot.position.z = Math.sin(elapsed * 0.36) * 5.2;
           }
 
           knot.rotation.x = elapsed * 0.38;
           knot.rotation.y = elapsed * 0.66;
           glossyBox.rotation.y = -elapsed * 0.48;
-          pointRig.rotation.y = elapsed * 0.58;
-          point.position.y = 2.35 + Math.sin(elapsed * 1.3) * 0.55;
-          spot.position.x = Math.cos(elapsed * 0.36) * 5.2;
-          spot.position.z = Math.sin(elapsed * 0.36) * 5.2;
-          ambientHelper.update();
+          matteSphere.position.y = 1.45 + Math.sin(elapsed * 1.2) * 0.12;
+          hemisphereHelper.update();
           directionalHelper.update();
           pointHelper.update();
           spotHelper.update();
         },
         setupGui: ({ gui }) => {
-          const folder = gui.addFolder("Light types");
-          folder.add(state, "ambient").name("ambient").onChange(syncLighting);
-          folder.add(state, "hemisphere").name("hemisphere").onChange(syncLighting);
-          folder.add(state, "directional").name("directional").onChange(syncLighting);
-          folder.add(state, "point").name("point").onChange(syncLighting);
-          folder.add(state, "spot").name("spot").onChange(syncLighting);
-          folder.add(state, "showHelpers").name("helpers").onChange(syncLighting);
-          folder.add(state, "rotateDisplay").name("turntable");
+          const folder = gui.addFolder("Lighting");
+          folder
+            .add(state, "preset", {
+              Balanced: "balanced",
+              "Ambient only": "ambient",
+              "Hemisphere only": "hemisphere",
+              "Directional only": "directional",
+              "Point only": "point",
+              "Spot only": "spot",
+              "All types": "full",
+            })
+            .name("setup")
+            .onChange(syncLighting);
+          folder.add(state, "helpers").name("helpers").onChange(syncLighting);
+          folder
+            .add(state, "ambient", 0, 1.5, 0.01)
+            .name("ambient")
+            .onChange(syncLighting);
+          folder
+            .add(state, "hemisphere", 0, 2, 0.01)
+            .name("hemisphere")
+            .onChange(syncLighting);
+          folder
+            .add(state, "directional", 0, 4, 0.01)
+            .name("directional")
+            .onChange(syncLighting);
+          folder
+            .add(state, "point", 0, 60, 0.1)
+            .name("point")
+            .onChange(syncLighting);
+          folder
+            .add(state, "spot", 0, 40, 0.1)
+            .name("spot")
+            .onChange(syncLighting);
+          folder.add(state, "animate").name("animate");
         },
         dispose: () => {
           disposeSceneResources([
             floor,
             pedestal,
             knot,
-            matteSphere,
             glossyBox,
+            matteSphere,
             pointOrb,
-            ambientHelper,
+            hemisphereHelper,
             directionalHelper,
             pointHelper,
             spotHelper,
@@ -1512,7 +1483,7 @@ const examples: ExampleDefinition[] = [
     },
   },
   {
-    step: "Step 04C",
+    step: "Step 04B",
     title: "Shadow Playground",
     summary: "Compare shadow casters, shadow map filters, helper frusta, and bias settings in one controllable scene.",
     notes:
@@ -1748,7 +1719,7 @@ const examples: ExampleDefinition[] = [
     },
   },
   {
-    step: "Step 04D",
+    step: "Step 04C",
     title: "PBR Lookdev Board",
     summary: "Lay out a full material-ball board so roughness, metalness, transmission, and shader-authored surfaces can be compared under one studio rig.",
     notes:
@@ -4376,6 +4347,1827 @@ const examples: ExampleDefinition[] = [
       };
     },
   },
+  {
+    step: "Step 19",
+    title: "WGSL Shader Lab",
+    summary: "Bridge from Three.js nodes to raw shader thinking: named uniforms drive a vertex stage, then a fragment stage shades the result.",
+    notes:
+      "This card still uses Three.js TSL so it stays inside the gallery, but it is organized like hand-written WGSL. Study the uniform block, then the vertex displacement, then the fragment color path, and map each one to the object in front of it.",
+    tags: ["uniform()", "@vertex", "@fragment", "WGSL mental model"],
+    cameraPosition: [9.2, 5.1, 9.8],
+    target: [0.6, 1.8, 0],
+    create: ({ scene, camera }) => {
+      scene.background = new THREE.Color("#07111d");
+      scene.fog = new THREE.Fog("#07111d", 16, 28);
+
+      const shaderState = {
+        amplitude: 0.34,
+        frequency: 2.8,
+        speed: 1.18,
+        twist: 0.56,
+        warmMix: 0.7,
+        showCode: true,
+        showFlow: true,
+        showUniformRack: true,
+        freeze: false,
+        vertexStage: true,
+        fragmentStage: true,
+      };
+
+      const panelTextures: THREE.Texture[] = [];
+      const billboardPanels: THREE.Mesh[] = [];
+      const flowMaterials: THREE.MeshStandardMaterial[] = [];
+      const flowPulseMaterials: THREE.MeshBasicMaterial[] = [];
+      const flowMeshes: THREE.Mesh[] = [];
+      const flowPulses: Array<{
+        curve: THREE.CatmullRomCurve3;
+        mesh: THREE.Mesh;
+        speed: number;
+        offset: number;
+      }> = [];
+
+      const createCodePanel = (
+        title: string,
+        subtitle: string,
+        lines: string[],
+        accent: string,
+        width: number,
+        height: number,
+      ): THREE.Mesh => {
+        const canvas = document.createElement("canvas");
+        canvas.width = 900;
+        canvas.height = 420;
+
+        const context = canvas.getContext("2d");
+
+        if (!context) {
+          throw new Error("Could not create 2D canvas context");
+        }
+
+        context.fillStyle = "rgba(7, 17, 29, 0.94)";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.fillStyle = accent;
+        context.fillRect(0, 0, canvas.width, 18);
+        context.strokeStyle = accent;
+        context.globalAlpha = 0.88;
+        context.lineWidth = 4;
+        context.strokeRect(2, 2, canvas.width - 4, canvas.height - 4);
+        context.globalAlpha = 1;
+        context.fillStyle = accent;
+        context.font = "700 42px Segoe UI, sans-serif";
+        context.fillText(title, 34, 74);
+        context.fillStyle = "#9cc4ff";
+        context.font = "600 26px Consolas, monospace";
+        context.fillText(subtitle, 34, 118);
+        context.fillStyle = "#d9eaff";
+        context.font = "500 26px Consolas, monospace";
+
+        lines.forEach((line, index) => {
+          context.fillText(line, 34, 182 + index * 42);
+        });
+
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.colorSpace = THREE.SRGBColorSpace;
+        panelTextures.push(texture);
+
+        const material = new THREE.MeshBasicMaterial({
+          map: texture,
+          transparent: true,
+          depthWrite: false,
+          toneMapped: false,
+        });
+
+        const panel = new THREE.Mesh(new THREE.PlaneGeometry(width, height), material);
+        panel.renderOrder = 3;
+        panel.userData.skipGlobalWireframe = true;
+        billboardPanels.push(panel);
+        return panel;
+      };
+
+      const createTagPanel = (text: string, accent: string, width: number, height: number): THREE.Mesh => {
+        const canvas = document.createElement("canvas");
+        canvas.width = 560;
+        canvas.height = 120;
+
+        const context = canvas.getContext("2d");
+
+        if (!context) {
+          throw new Error("Could not create 2D canvas context");
+        }
+
+        context.fillStyle = "rgba(7, 17, 29, 0.94)";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.strokeStyle = accent;
+        context.globalAlpha = 0.88;
+        context.lineWidth = 4;
+        context.strokeRect(2, 2, canvas.width - 4, canvas.height - 4);
+        context.globalAlpha = 1;
+        context.fillStyle = accent;
+        context.font = "600 30px Consolas, monospace";
+        context.textAlign = "center";
+        context.fillText(text, canvas.width / 2, 72);
+
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.colorSpace = THREE.SRGBColorSpace;
+        panelTextures.push(texture);
+
+        const material = new THREE.MeshBasicMaterial({
+          map: texture,
+          transparent: true,
+          depthWrite: false,
+          toneMapped: false,
+        });
+
+        const panel = new THREE.Mesh(new THREE.PlaneGeometry(width, height), material);
+        panel.renderOrder = 3;
+        panel.userData.skipGlobalWireframe = true;
+        billboardPanels.push(panel);
+        return panel;
+      };
+
+      const ambient = new THREE.AmbientLight("#7baeff", 0.3);
+      const hemi = new THREE.HemisphereLight("#7ac8ff", "#06111a", 0.48);
+      const key = new THREE.DirectionalLight("#fff4dc", 1.75);
+      key.position.set(6.4, 8.8, 4.2);
+      key.castShadow = true;
+      key.shadow.mapSize.set(1024, 1024);
+      key.shadow.camera.left = -8;
+      key.shadow.camera.right = 8;
+      key.shadow.camera.top = 8;
+      key.shadow.camera.bottom = -8;
+      key.shadow.normalBias = 0.16;
+      const rim = new THREE.PointLight("#5bcfff", 12, 16, 2);
+      rim.position.set(-4.8, 3.2, -2.4);
+      scene.add(ambient, hemi, key, rim);
+
+      const stageBase = new THREE.Mesh(
+        new THREE.BoxGeometry(12.6, 0.36, 6.1),
+        new THREE.MeshStandardMaterial({
+          color: "#0d1a29",
+          roughness: 0.96,
+          metalness: 0.04,
+        }),
+      );
+      stageBase.position.set(0.45, -0.56, 0.02);
+      stageBase.receiveShadow = true;
+
+      const stageDeck = new THREE.Mesh(
+        new THREE.BoxGeometry(12, 0.08, 5.52),
+        new THREE.MeshStandardMaterial({
+          color: "#132538",
+          roughness: 0.88,
+          metalness: 0.06,
+        }),
+      );
+      stageDeck.position.set(0.45, -0.32, 0.02);
+      stageDeck.receiveShadow = true;
+
+      const uniformPad = new THREE.Mesh(
+        new THREE.BoxGeometry(2.8, 0.08, 2.4),
+        new THREE.MeshStandardMaterial({
+          color: "#1c2f45",
+          roughness: 0.82,
+          metalness: 0.08,
+        }),
+      );
+      uniformPad.position.set(-3.6, -0.24, 0.1);
+      uniformPad.receiveShadow = true;
+
+      const shaderPad = new THREE.Mesh(
+        new THREE.BoxGeometry(2.9, 0.08, 2.9),
+        new THREE.MeshStandardMaterial({
+          color: "#162a3d",
+          roughness: 0.82,
+          metalness: 0.06,
+        }),
+      );
+      shaderPad.position.set(0.2, -0.24, 0.1);
+      shaderPad.receiveShadow = true;
+
+      const fragmentPad = new THREE.Mesh(
+        new THREE.BoxGeometry(3.6, 0.08, 2.7),
+        new THREE.MeshStandardMaterial({
+          color: "#152b40",
+          roughness: 0.84,
+          metalness: 0.06,
+        }),
+      );
+      fragmentPad.position.set(4.2, -0.24, -0.05);
+      fragmentPad.receiveShadow = true;
+
+      scene.add(stageBase, stageDeck, uniformPad, shaderPad, fragmentPad);
+
+      const amplitudeUniform = uniform(shaderState.amplitude, "float").setName("u_amplitude");
+      const frequencyUniform = uniform(shaderState.frequency, "float").setName("u_frequency");
+      const speedUniform = uniform(shaderState.speed, "float").setName("u_speed");
+      const twistUniform = uniform(shaderState.twist, "float").setName("u_twist");
+      const warmMixUniform = uniform(shaderState.warmMix, "float").setName("u_warmMix");
+      const stageTimeUniform = uniform(0, "float").setName("u_time");
+      const vertexEnabledUniform = uniform(1, "float").setName("u_vertexEnabled");
+      const fragmentEnabledUniform = uniform(1, "float").setName("u_fragmentEnabled");
+
+      const wave = sin(positionLocal.y.mul(frequencyUniform).add(stageTimeUniform.mul(speedUniform)).add(positionLocal.x.mul(2.2)));
+      const crossWave = cos(positionLocal.x.mul(frequencyUniform.mul(0.85)).sub(stageTimeUniform.mul(speedUniform.mul(0.72))).add(positionLocal.z.mul(2.6)));
+      const vertexOffset = vec3(
+        positionLocal.z.mul(wave).mul(twistUniform).mul(0.22),
+        wave.add(crossWave.mul(0.45)).mul(amplitudeUniform),
+        positionLocal.x.mul(crossWave).mul(twistUniform).mul(-0.22),
+      ).mul(vertexEnabledUniform);
+
+      const band = sin(uv().y.mul(20).add(stageTimeUniform.mul(speedUniform.mul(0.42)))).mul(0.5).add(0.5);
+      const sweep = sin(uv().x.mul(13).sub(stageTimeUniform.mul(speedUniform.mul(0.58))).add(uv().y.mul(6))).mul(0.5).add(0.5);
+      const fragmentColor = mix(
+        mix(color("#132c52"), color("#77e6ff"), band.clamp()),
+        color("#ffb56f"),
+        sweep.mul(warmMixUniform).clamp(),
+      );
+
+      const specimenMaterial = new THREE.MeshStandardNodeMaterial({
+        roughness: 0.28,
+        metalness: 0.08,
+      });
+      specimenMaterial.positionNode = positionLocal.add(vertexOffset);
+      specimenMaterial.colorNode = mix(color("#a9bdd6"), fragmentColor, fragmentEnabledUniform);
+
+      const fragmentPreviewMaterial = new THREE.MeshStandardNodeMaterial({
+        roughness: 0.44,
+        metalness: 0.04,
+        side: THREE.DoubleSide,
+      });
+      fragmentPreviewMaterial.colorNode = mix(color("#8fa4ba"), fragmentColor, fragmentEnabledUniform);
+
+      const specimen = new THREE.Mesh(new THREE.CylinderGeometry(0.96, 1.16, 3.5, 88, 120, true), specimenMaterial);
+      specimen.position.set(0.2, 1.74, 0.18);
+      specimen.castShadow = true;
+      specimen.receiveShadow = true;
+
+      const specimenCapTop = new THREE.Mesh(
+        new THREE.CircleGeometry(0.96, 88),
+        new THREE.MeshStandardMaterial({
+          color: "#21384d",
+          roughness: 0.72,
+          metalness: 0.06,
+        }),
+      );
+      specimenCapTop.rotation.x = -Math.PI / 2;
+      specimenCapTop.position.set(0.2, 3.48, 0.18);
+      specimenCapTop.castShadow = true;
+
+      const specimenCapBottom = new THREE.Mesh(
+        new THREE.CircleGeometry(1.16, 88),
+        new THREE.MeshStandardMaterial({
+          color: "#16293d",
+          roughness: 0.82,
+          metalness: 0.04,
+        }),
+      );
+      specimenCapBottom.rotation.x = -Math.PI / 2;
+      specimenCapBottom.position.set(0.2, -0.02, 0.18);
+      specimenCapBottom.receiveShadow = true;
+
+      const fragmentPanelFrame = new THREE.Mesh(
+        new THREE.BoxGeometry(2.1, 2.46, 0.1),
+        new THREE.MeshStandardMaterial({
+          color: "#20344b",
+          roughness: 0.58,
+          metalness: 0.18,
+          emissive: "#16324b",
+          emissiveIntensity: 0.24,
+        }),
+      );
+      fragmentPanelFrame.position.set(4.25, 1.7, -0.12);
+      fragmentPanelFrame.castShadow = true;
+
+      const fragmentPanel = new THREE.Mesh(new THREE.PlaneGeometry(1.82, 2.18), fragmentPreviewMaterial);
+      fragmentPanel.position.set(4.25, 1.7, -0.03);
+      fragmentPanel.rotation.y = -0.26;
+      fragmentPanel.receiveShadow = true;
+
+      const rackGroup = new THREE.Group();
+      rackGroup.position.set(-3.6, 0, 0.1);
+
+      const rackBase = new THREE.Mesh(
+        new THREE.BoxGeometry(1.8, 0.24, 1.4),
+        new THREE.MeshStandardMaterial({
+          color: "#162a3d",
+          roughness: 0.84,
+          metalness: 0.08,
+        }),
+      );
+      rackBase.position.y = 0.08;
+      rackBase.castShadow = true;
+      rackBase.receiveShadow = true;
+
+      const rackCore = new THREE.Mesh(
+        new THREE.BoxGeometry(1.3, 1.7, 0.84),
+        new THREE.MeshStandardMaterial({
+          color: "#1c334b",
+          roughness: 0.58,
+          metalness: 0.16,
+          emissive: "#13263b",
+          emissiveIntensity: 0.26,
+        }),
+      );
+      rackCore.position.y = 1;
+      rackCore.castShadow = true;
+      rackCore.receiveShadow = true;
+
+      const rackBars = [
+        { mesh: new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 0.8, 20), new THREE.MeshStandardMaterial({ color: "#7ce6ff", emissive: "#2aa2ff", emissiveIntensity: 0.42, roughness: 0.3, metalness: 0.08 })), key: "amplitude" as const, min: 0, max: 0.55, x: -0.42 },
+        { mesh: new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 0.8, 20), new THREE.MeshStandardMaterial({ color: "#ffca77", emissive: "#ff9d43", emissiveIntensity: 0.38, roughness: 0.3, metalness: 0.08 })), key: "frequency" as const, min: 0.5, max: 6, x: -0.14 },
+        { mesh: new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 0.8, 20), new THREE.MeshStandardMaterial({ color: "#a6ffcc", emissive: "#45d7a6", emissiveIntensity: 0.36, roughness: 0.3, metalness: 0.08 })), key: "speed" as const, min: 0, max: 3, x: 0.14 },
+        { mesh: new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 0.8, 20), new THREE.MeshStandardMaterial({ color: "#d7b2ff", emissive: "#946dff", emissiveIntensity: 0.36, roughness: 0.3, metalness: 0.08 })), key: "twist" as const, min: 0, max: 1.4, x: 0.42 },
+      ];
+
+      for (const bar of rackBars) {
+        bar.mesh.position.set(bar.x, 0.86, 0.32);
+        bar.mesh.castShadow = true;
+        rackGroup.add(bar.mesh);
+      }
+
+      rackGroup.add(rackBase, rackCore);
+
+      const addFlowLink = (
+        points: THREE.Vector3[],
+        radius: number,
+        tubeColor: string,
+        pulseColor: string,
+        speed: number,
+        offset: number,
+      ) => {
+        const curve = new THREE.CatmullRomCurve3(points);
+        const tubeMaterial = new THREE.MeshStandardMaterial({
+          color: tubeColor,
+          emissive: tubeColor,
+          emissiveIntensity: 0.78,
+          roughness: 0.24,
+          metalness: 0.08,
+        });
+        const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 44, radius, 12, false), tubeMaterial);
+        tube.userData.skipGlobalWireframe = true;
+        flowGroup.add(tube);
+        flowMeshes.push(tube);
+        flowMaterials.push(tubeMaterial);
+
+        const pulseMaterial = new THREE.MeshBasicMaterial({
+          color: pulseColor,
+          toneMapped: false,
+        });
+        const pulse = new THREE.Mesh(new THREE.SphereGeometry(radius * 2.5, 14, 12), pulseMaterial);
+        pulse.userData.skipGlobalWireframe = true;
+        flowGroup.add(pulse);
+        flowPulseMaterials.push(pulseMaterial);
+        flowPulses.push({ curve, mesh: pulse, speed, offset });
+      };
+
+      const flowGroup = new THREE.Group();
+      addFlowLink(
+        [
+          new THREE.Vector3(-2.72, 1.82, 0.52),
+          new THREE.Vector3(-1.94, 2.1, 0.76),
+          new THREE.Vector3(-0.92, 2.1, 0.74),
+          new THREE.Vector3(-0.16, 1.98, 0.54),
+        ],
+        0.04,
+        "#ffcb7a",
+        "#fff2c7",
+        0.18,
+        0.04,
+      );
+      addFlowLink(
+        [
+          new THREE.Vector3(1.18, 2.42, 0.12),
+          new THREE.Vector3(2.1, 2.46, -0.02),
+          new THREE.Vector3(3.0, 2.16, -0.08),
+          new THREE.Vector3(3.82, 1.88, -0.1),
+        ],
+        0.032,
+        "#8edfff",
+        "#dff8ff",
+        0.22,
+        0.38,
+      );
+      addFlowLink(
+        [
+          new THREE.Vector3(0.92, 0.86, 0.74),
+          new THREE.Vector3(1.9, 0.96, 0.88),
+          new THREE.Vector3(2.95, 1.04, 0.44),
+          new THREE.Vector3(3.82, 1.28, 0.02),
+        ],
+        0.024,
+        "#65d5ff",
+        "#dff8ff",
+        0.2,
+        0.62,
+      );
+
+      const uniformPanel = createCodePanel(
+        "Uniform Block",
+        "@group(0) @binding(0)",
+        [
+          "struct Uniforms {",
+          "  amplitude: f32, frequency: f32,",
+          "  speed: f32, twist: f32,",
+          "  time: f32, warmMix: f32,",
+          "};",
+        ],
+        "#73e0ff",
+        3.25,
+        1.55,
+      );
+      uniformPanel.position.set(-3.64, 4.16, 0.38);
+
+      const vertexPanel = createCodePanel(
+        "Vertex Stage",
+        "@vertex fn vs_main(...)",
+        [
+          "let wave = sin(pos.y * u.frequency + u.time);",
+          "let bend = cos(pos.x * 0.85 * u.frequency);",
+          "let offset = vec3f(",
+          "  pos.z * wave * u.twist,",
+          "  (wave + bend * 0.45) * u.amplitude,",
+          "  pos.x * bend * -u.twist );",
+        ],
+        "#ffca77",
+        3.35,
+        1.72,
+      );
+      vertexPanel.position.set(0.18, 4.1, 0.42);
+
+      const fragmentPanelCode = createCodePanel(
+        "Fragment Stage",
+        "@fragment fn fs_main(...)",
+        [
+          "let band = sin(uv.y * 20.0 + u.time);",
+          "let sweep = sin(uv.x * 13.0 + uv.y * 6.0);",
+          "let cool = mix(deepBlue, cyan, band);",
+          "let warm = mix(cool, amber, sweep * u.warmMix);",
+          "return vec4f(warm, 1.0);",
+        ],
+        "#9fe8ca",
+        3.4,
+        1.6,
+      );
+      fragmentPanelCode.position.set(4.22, 4.04, 0.18);
+
+      const specimenTag = createTagPanel("positionNode -> @vertex", "#ffca77", 2.2, 0.42);
+      specimenTag.position.set(0.22, 0.76, 1.82);
+      const fragmentTag = createTagPanel("colorNode -> @fragment", "#9fe8ca", 2.25, 0.42);
+      fragmentTag.position.set(4.24, 0.84, 1.16);
+
+      scene.add(
+        rackGroup,
+        specimen,
+        specimenCapTop,
+        specimenCapBottom,
+        fragmentPanelFrame,
+        fragmentPanel,
+        flowGroup,
+        uniformPanel,
+        vertexPanel,
+        fragmentPanelCode,
+        specimenTag,
+        fragmentTag,
+      );
+
+      let shaderTime = 0;
+      const flowPoint = new THREE.Vector3();
+
+      const syncShaderState = () => {
+        amplitudeUniform.value = shaderState.amplitude;
+        frequencyUniform.value = shaderState.frequency;
+        speedUniform.value = shaderState.speed;
+        twistUniform.value = shaderState.twist;
+        warmMixUniform.value = shaderState.warmMix;
+        vertexEnabledUniform.value = shaderState.vertexStage ? 1 : 0;
+        fragmentEnabledUniform.value = shaderState.fragmentStage ? 1 : 0;
+        rackGroup.visible = shaderState.showUniformRack;
+        flowGroup.visible = shaderState.showFlow;
+
+        for (const panel of billboardPanels) {
+          panel.visible = shaderState.showCode;
+        }
+      };
+
+      syncShaderState();
+
+      return {
+        update: (_elapsed, delta) => {
+          if (!shaderState.freeze) {
+            shaderTime += delta;
+          }
+
+          stageTimeUniform.value = shaderTime;
+          syncShaderState();
+
+          specimen.rotation.y = shaderTime * 0.32;
+          specimenCapTop.rotation.z = shaderTime * 0.18;
+
+          const barValues = [
+            shaderState.amplitude / 0.55,
+            (shaderState.frequency - 0.5) / 5.5,
+            shaderState.speed / 3,
+            shaderState.twist / 1.4,
+          ];
+
+          rackBars.forEach((bar, index) => {
+            const normalized = THREE.MathUtils.clamp(barValues[index], 0.08, 1);
+            bar.mesh.scale.y = 0.45 + normalized * 1.3;
+            bar.mesh.position.y = 0.42 + bar.mesh.scale.y * 0.48;
+          });
+
+          for (const panel of billboardPanels) {
+            panel.lookAt(camera.position.x, camera.position.y, camera.position.z);
+            panel.rotateY(Math.PI);
+          }
+
+          for (const pulse of flowPulses) {
+            pulse.curve.getPointAt((shaderTime * pulse.speed + pulse.offset) % 1, flowPoint);
+            pulse.mesh.position.copy(flowPoint);
+            pulse.mesh.scale.setScalar(0.94 + Math.sin(shaderTime * 4 + pulse.offset * 10) * 0.1);
+          }
+        },
+        setupGui: ({ gui }) => {
+          const folder = gui.addFolder("Shader lab");
+          folder.add(shaderState, "amplitude", 0, 0.55, 0.01).name("amplitude");
+          folder.add(shaderState, "frequency", 0.5, 6, 0.01).name("frequency");
+          folder.add(shaderState, "speed", 0, 3, 0.01).name("speed");
+          folder.add(shaderState, "twist", 0, 1.4, 0.01).name("twist");
+          folder.add(shaderState, "warmMix", 0, 1, 0.01).name("warm mix");
+          folder.add(shaderState, "vertexStage").name("vertex stage");
+          folder.add(shaderState, "fragmentStage").name("fragment stage");
+          folder.add(shaderState, "showUniformRack").name("uniform rack");
+          folder.add(shaderState, "showFlow").name("show flow");
+          folder.add(shaderState, "showCode").name("show code");
+          folder.add(shaderState, "freeze").name("freeze");
+        },
+        dispose: () => {
+          specimen.geometry.dispose();
+          specimenMaterial.dispose();
+          specimenCapTop.geometry.dispose();
+          (specimenCapTop.material as THREE.Material).dispose();
+          specimenCapBottom.geometry.dispose();
+          (specimenCapBottom.material as THREE.Material).dispose();
+          fragmentPanelFrame.geometry.dispose();
+          (fragmentPanelFrame.material as THREE.Material).dispose();
+          fragmentPanel.geometry.dispose();
+          fragmentPreviewMaterial.dispose();
+          rackBase.geometry.dispose();
+          (rackBase.material as THREE.Material).dispose();
+          rackCore.geometry.dispose();
+          (rackCore.material as THREE.Material).dispose();
+          stageBase.geometry.dispose();
+          (stageBase.material as THREE.Material).dispose();
+          stageDeck.geometry.dispose();
+          (stageDeck.material as THREE.Material).dispose();
+          uniformPad.geometry.dispose();
+          (uniformPad.material as THREE.Material).dispose();
+          shaderPad.geometry.dispose();
+          (shaderPad.material as THREE.Material).dispose();
+          fragmentPad.geometry.dispose();
+          (fragmentPad.material as THREE.Material).dispose();
+
+          for (const bar of rackBars) {
+            bar.mesh.geometry.dispose();
+            (bar.mesh.material as THREE.Material).dispose();
+          }
+
+          for (const mesh of flowMeshes) {
+            mesh.geometry.dispose();
+          }
+
+          for (const material of flowMaterials) {
+            material.dispose();
+          }
+
+          for (const pulse of flowPulses) {
+            pulse.mesh.geometry.dispose();
+          }
+
+          for (const material of flowPulseMaterials) {
+            material.dispose();
+          }
+
+          for (const panel of billboardPanels) {
+            panel.geometry.dispose();
+            (panel.material as THREE.Material).dispose();
+          }
+
+          for (const texture of panelTextures) {
+            texture.dispose();
+          }
+        },
+      };
+    },
+  },
+  {
+    step: "Step 20",
+    title: "Distortion Shadow Stage",
+    summary: "Drive a hero mesh with uniform-controlled vertex distortion and watch the silhouette and ground shadow warp together.",
+    notes:
+      "This is the shader moment where deformation stops feeling decorative. The same animated surface that bends the lighting is also reshaping the shadow, so you can see the vertex stage affecting the whole scene.",
+    tags: ["positionNode", "Uniform-driven deformation", "Shadow warp"],
+    cameraPosition: [8.8, 5.4, 8.8],
+    target: [0.1, 1.8, 0],
+    create: ({ scene }) => {
+      scene.background = new THREE.Color("#06111d");
+      scene.fog = new THREE.Fog("#06111d", 14, 28);
+
+      const state = {
+        amplitude: 0.78,
+        frequency: 3.1,
+        speed: 1.16,
+        twist: 0.74,
+        animateLight: true,
+      };
+
+      const ambient = new THREE.AmbientLight("#7db2ff", 0.22);
+      const hemi = new THREE.HemisphereLight("#6bc8ff", "#06111a", 0.4);
+      const key = new THREE.DirectionalLight("#fff1d6", 1.65);
+      key.position.set(5.8, 8.6, 4.2);
+      key.castShadow = true;
+      key.shadow.mapSize.set(1024, 1024);
+      key.shadow.camera.left = -8;
+      key.shadow.camera.right = 8;
+      key.shadow.camera.top = 8;
+      key.shadow.camera.bottom = -8;
+      key.shadow.normalBias = 0.16;
+      const spot = new THREE.SpotLight("#8ee6ff", 22, 24, Math.PI / 5.6, 0.34, 1.1);
+      spot.position.set(-5.4, 6.6, 4.6);
+      const spotTarget = new THREE.Object3D();
+      spotTarget.position.set(0, 1.4, 0);
+      spot.target = spotTarget;
+      spot.castShadow = true;
+      spot.shadow.mapSize.set(1024, 1024);
+      spot.shadow.normalBias = 0.14;
+      scene.add(ambient, hemi, key, spot, spotTarget);
+
+      const floor = new THREE.Mesh(
+        new THREE.CircleGeometry(7.8, 72),
+        new THREE.MeshStandardMaterial({
+          color: "#102032",
+          roughness: 0.97,
+          metalness: 0.03,
+        }),
+      );
+      floor.rotation.x = -Math.PI / 2;
+      floor.position.y = -1.28;
+      floor.receiveShadow = true;
+
+      const pedestal = new THREE.Mesh(
+        new THREE.CylinderGeometry(1.72, 1.92, 0.42, 56),
+        new THREE.MeshStandardMaterial({
+          color: "#173149",
+          roughness: 0.82,
+          metalness: 0.08,
+        }),
+      );
+      pedestal.position.y = -1.06;
+      pedestal.castShadow = true;
+      pedestal.receiveShadow = true;
+
+      const halo = new THREE.Mesh(
+        new THREE.TorusGeometry(2.52, 0.08, 12, 84),
+        new THREE.MeshStandardMaterial({
+          color: "#22496d",
+          roughness: 0.28,
+          metalness: 0.38,
+          emissive: "#16395b",
+          emissiveIntensity: 0.32,
+        }),
+      );
+      halo.rotation.x = Math.PI / 2;
+      halo.position.y = -1.02;
+      halo.castShadow = true;
+
+      const amplitudeUniform = uniform(state.amplitude, "float").setName("u_amplitude");
+      const frequencyUniform = uniform(state.frequency, "float").setName("u_frequency");
+      const speedUniform = uniform(state.speed, "float").setName("u_speed");
+      const twistUniform = uniform(state.twist, "float").setName("u_twist");
+      const stageTimeUniform = uniform(0, "float").setName("u_time");
+
+      const waveA = sin(positionLocal.y.mul(frequencyUniform).add(stageTimeUniform.mul(speedUniform)).add(positionLocal.x.mul(2.4)));
+      const waveB = cos(positionLocal.z.mul(frequencyUniform.mul(0.72)).sub(stageTimeUniform.mul(speedUniform.mul(0.8))).add(positionLocal.x.mul(1.9)));
+      const displacement = normalLocal
+        .mul(waveA.mul(0.22).add(waveB.mul(0.11)).mul(amplitudeUniform))
+        .add(
+          vec3(
+            positionLocal.z.mul(waveA).mul(twistUniform).mul(0.18),
+            0,
+            positionLocal.x.mul(waveB).mul(twistUniform).mul(-0.18),
+          ),
+        );
+
+      const heroMaterial = new THREE.MeshStandardNodeMaterial({
+        roughness: 0.2,
+        metalness: 0.12,
+      });
+      heroMaterial.positionNode = positionLocal.add(displacement);
+      heroMaterial.colorNode = mix(
+        mix(color("#10244d"), color("#6ce4ff"), waveA.add(1).mul(0.5).clamp()),
+        color("#ffb96f"),
+        uv().y.add(waveB.mul(0.3)).clamp(),
+      );
+
+      const hero = new THREE.Mesh(new THREE.TorusKnotGeometry(1.15, 0.42, 260, 36), heroMaterial);
+      hero.position.y = 1.45;
+      hero.castShadow = true;
+      hero.receiveShadow = true;
+
+      scene.add(floor, pedestal, halo, hero);
+
+      return {
+        update: (elapsed) => {
+          stageTimeUniform.value = elapsed;
+          amplitudeUniform.value = state.amplitude;
+          frequencyUniform.value = state.frequency;
+          speedUniform.value = state.speed;
+          twistUniform.value = state.twist;
+
+          hero.rotation.x = elapsed * 0.28;
+          hero.rotation.y = elapsed * 0.54;
+          halo.rotation.z = elapsed * 0.22;
+
+          if (state.animateLight) {
+            spot.position.x = Math.cos(elapsed * 0.42) * 5.8;
+            spot.position.z = Math.sin(elapsed * 0.42) * 5.2;
+          }
+        },
+        setupGui: ({ gui }) => {
+          const folder = gui.addFolder("Distortion");
+          folder.add(state, "amplitude", 0, 1.2, 0.01).name("amplitude");
+          folder.add(state, "frequency", 0.5, 6, 0.01).name("frequency");
+          folder.add(state, "speed", 0, 3, 0.01).name("speed");
+          folder.add(state, "twist", 0, 1.5, 0.01).name("twist");
+          folder.add(state, "animateLight").name("animate light");
+        },
+        dispose: () => {
+          hero.geometry.dispose();
+          heroMaterial.dispose();
+          floor.geometry.dispose();
+          (floor.material as THREE.Material).dispose();
+          pedestal.geometry.dispose();
+          (pedestal.material as THREE.Material).dispose();
+          halo.geometry.dispose();
+          (halo.material as THREE.Material).dispose();
+        },
+      };
+    },
+  },
+  {
+    step: "Step 21",
+    title: "Frosted Blur Lens",
+    summary: "Use transmission, roughness, and a little vertex wobble to turn a mesh into a shadow-casting frosted lens that blurs what's behind it.",
+    notes:
+      "This one is about reading through the material instead of just at it. The colored bars and test board behind the glass make the blur, refraction, and thickness much easier to judge than a plain environment map.",
+    tags: ["MeshPhysicalNodeMaterial", "Transmission", "Frosted glass"],
+    cameraPosition: [8.8, 4.8, 8.6],
+    target: [0.4, 1.55, -0.4],
+    create: ({ scene, renderer }) => {
+      scene.background = new THREE.Color("#c9d1db");
+      scene.fog = new THREE.Fog("#c9d1db", 16, 30);
+      renderer.toneMappingExposure = 0.92;
+
+      const roomEnvironment = new RoomEnvironment();
+      const pmremGenerator = new THREE.PMREMGenerator(renderer);
+      const environmentTarget = pmremGenerator.fromScene(roomEnvironment, 0.03);
+      scene.environment = environmentTarget.texture;
+
+      const floorTexture = createLookdevFloorTexture();
+      floorTexture.repeat.set(2.6, 2);
+
+      const backdropCanvas = document.createElement("canvas");
+      backdropCanvas.width = 640;
+      backdropCanvas.height = 384;
+      const backdropContext = backdropCanvas.getContext("2d");
+
+      if (!backdropContext) {
+        throw new Error("Could not create backdrop 2D canvas context");
+      }
+
+      backdropContext.fillStyle = "#e6ebf2";
+      backdropContext.fillRect(0, 0, backdropCanvas.width, backdropCanvas.height);
+      backdropContext.fillStyle = "#d6dde8";
+      backdropContext.fillRect(0, 0, backdropCanvas.width, 64);
+      backdropContext.fillStyle = "#7c8a9b";
+      backdropContext.font = "700 46px Segoe UI, sans-serif";
+      backdropContext.fillText("FROST TEST", 26, 46);
+
+      const swatches = ["#ff6b6b", "#5fe08f", "#59a6ff", "#ffcb6d"];
+      swatches.forEach((value, index) => {
+        backdropContext.fillStyle = value;
+        backdropContext.fillRect(48 + index * 138, 106, 84, 188);
+      });
+
+      backdropContext.strokeStyle = "#526276";
+      backdropContext.lineWidth = 6;
+      backdropContext.beginPath();
+      backdropContext.moveTo(54, 318);
+      backdropContext.lineTo(584, 318);
+      backdropContext.stroke();
+
+      backdropContext.strokeStyle = "#7b8796";
+      backdropContext.lineWidth = 3;
+      for (let index = 0; index <= 10; index += 1) {
+        const x = 52 + index * 53;
+        backdropContext.beginPath();
+        backdropContext.moveTo(x, 84);
+        backdropContext.lineTo(x, 336);
+        backdropContext.stroke();
+      }
+
+      const backdropTexture = new THREE.CanvasTexture(backdropCanvas);
+      backdropTexture.colorSpace = THREE.SRGBColorSpace;
+
+      const ambient = new THREE.AmbientLight("#8bb4ff", 0.26);
+      const key = new THREE.DirectionalLight("#fff6e0", 1.45);
+      key.position.set(5.2, 7.6, 4.4);
+      key.castShadow = true;
+      key.shadow.mapSize.set(1024, 1024);
+      key.shadow.camera.left = -8;
+      key.shadow.camera.right = 8;
+      key.shadow.camera.top = 8;
+      key.shadow.camera.bottom = -8;
+      key.shadow.normalBias = 0.14;
+      const spot = new THREE.SpotLight("#dff5ff", 16, 24, Math.PI / 5.2, 0.32, 1.1);
+      spot.position.set(-4.8, 6.2, 5.2);
+      const spotTarget = new THREE.Object3D();
+      spotTarget.position.set(0.2, 1.2, -0.6);
+      spot.target = spotTarget;
+      spot.castShadow = true;
+      spot.shadow.mapSize.set(1024, 1024);
+      spot.shadow.normalBias = 0.14;
+      scene.add(ambient, key, spot, spotTarget);
+
+      const floor = new THREE.Mesh(
+        new THREE.PlaneGeometry(11.8, 11.8),
+        new THREE.MeshPhysicalMaterial({
+          color: "#b9c2cf",
+          map: floorTexture,
+          roughness: 0.92,
+          metalness: 0.02,
+        }),
+      );
+      floor.rotation.x = -Math.PI / 2;
+      floor.receiveShadow = true;
+
+      const backdrop = new THREE.Mesh(
+        new THREE.PlaneGeometry(5.8, 3.5),
+        new THREE.MeshBasicMaterial({
+          map: backdropTexture,
+          toneMapped: false,
+        }),
+      );
+      backdrop.position.set(0.3, 2.05, -2.7);
+      backdrop.userData.skipGlobalWireframe = true;
+
+      const sideBarA = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.14, 0.14, 2.8, 20),
+        new THREE.MeshStandardMaterial({
+          color: "#ff7a7a",
+          roughness: 0.18,
+          metalness: 0.06,
+          emissive: "#b33c3c",
+          emissiveIntensity: 0.3,
+        }),
+      );
+      sideBarA.position.set(-2.2, 1.32, -1.86);
+      sideBarA.castShadow = true;
+
+      const sideBarB = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.14, 0.14, 2.8, 20),
+        new THREE.MeshStandardMaterial({
+          color: "#5fe08f",
+          roughness: 0.18,
+          metalness: 0.06,
+          emissive: "#2c874e",
+          emissiveIntensity: 0.28,
+        }),
+      );
+      sideBarB.position.set(0.2, 1.32, -1.9);
+      sideBarB.castShadow = true;
+
+      const sideBarC = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.14, 0.14, 2.8, 20),
+        new THREE.MeshStandardMaterial({
+          color: "#59a6ff",
+          roughness: 0.18,
+          metalness: 0.06,
+          emissive: "#295892",
+          emissiveIntensity: 0.3,
+        }),
+      );
+      sideBarC.position.set(2.3, 1.32, -1.94);
+      sideBarC.castShadow = true;
+
+      const state = {
+        frost: 0.42,
+        thickness: 1.4,
+        ior: 1.14,
+        wobble: 0.11,
+        animate: true,
+      };
+
+      const frostUniform = uniform(state.frost, "float").setName("u_frost");
+      const wobbleUniform = uniform(state.wobble, "float").setName("u_wobble");
+      const stageTimeUniform = uniform(0, "float").setName("u_time");
+
+      const frostWave = sin(uv().x.mul(16).add(stageTimeUniform.mul(0.55))).mul(0.5).add(0.5);
+      const frostCross = cos(uv().y.mul(18).sub(stageTimeUniform.mul(0.46))).mul(0.5).add(0.5);
+      const frostMix = frostWave.mul(0.56).add(frostCross.mul(0.44)).mul(frostUniform).clamp();
+      const lensOffset = normalLocal.mul(
+        sin(positionLocal.y.mul(3.6).add(stageTimeUniform.mul(0.9))).mul(wobbleUniform).mul(0.2),
+      );
+
+      const glassMaterial = new THREE.MeshPhysicalNodeMaterial();
+      glassMaterial.colorNode = mix(color("#d6efff"), color("#9fd1ff"), uv().y);
+      glassMaterial.roughnessNode = frostMix.mul(0.82).add(0.02);
+      glassMaterial.positionNode = positionLocal.add(lensOffset);
+      glassMaterial.transmission = 1;
+      glassMaterial.thickness = state.thickness;
+      glassMaterial.ior = state.ior;
+      glassMaterial.clearcoat = 0.35;
+      glassMaterial.clearcoatRoughness = 0.12;
+
+      const slabMaterial = new THREE.MeshPhysicalNodeMaterial();
+      slabMaterial.colorNode = mix(color("#f4fbff"), color("#a8d4ff"), uv().x);
+      slabMaterial.roughnessNode = frostMix.mul(0.62).add(0.05);
+      slabMaterial.positionNode = positionLocal.add(lensOffset.mul(0.65));
+      slabMaterial.transmission = 1;
+      slabMaterial.thickness = state.thickness * 0.8;
+      slabMaterial.ior = state.ior + 0.04;
+      slabMaterial.clearcoat = 0.28;
+      slabMaterial.clearcoatRoughness = 0.14;
+
+      const lens = new THREE.Mesh(new THREE.SphereGeometry(1.18, 64, 48), glassMaterial);
+      lens.position.set(-0.35, 1.3, -0.38);
+      lens.castShadow = true;
+      lens.receiveShadow = true;
+
+      const slab = new THREE.Mesh(new THREE.BoxGeometry(1.02, 2.36, 0.58, 24, 48, 12), slabMaterial);
+      slab.position.set(1.82, 1.1, -0.12);
+      slab.rotation.y = -0.48;
+      slab.castShadow = true;
+      slab.receiveShadow = true;
+
+      scene.add(floor, backdrop, sideBarA, sideBarB, sideBarC, lens, slab);
+
+      return {
+        update: (elapsed) => {
+          stageTimeUniform.value = elapsed;
+          frostUniform.value = state.frost;
+          wobbleUniform.value = state.wobble;
+          glassMaterial.thickness = state.thickness;
+          glassMaterial.ior = state.ior;
+          slabMaterial.thickness = state.thickness * 0.8;
+          slabMaterial.ior = state.ior + 0.04;
+
+          if (state.animate) {
+            lens.rotation.y = elapsed * 0.34;
+            slab.rotation.y = -0.48 + Math.sin(elapsed * 0.42) * 0.14;
+          }
+        },
+        setupGui: ({ gui }) => {
+          const folder = gui.addFolder("Frosted glass");
+          folder.add(state, "frost", 0, 0.8, 0.01).name("frost");
+          folder.add(state, "thickness", 0.1, 2.4, 0.01).name("thickness");
+          folder.add(state, "ior", 1, 1.5, 0.01).name("ior");
+          folder.add(state, "wobble", 0, 0.3, 0.01).name("wobble");
+          folder.add(state, "animate").name("animate");
+        },
+        dispose: () => {
+          scene.environment = null;
+          floorTexture.dispose();
+          backdropTexture.dispose();
+          environmentTarget.dispose();
+          pmremGenerator.dispose();
+          roomEnvironment.dispose();
+          floor.geometry.dispose();
+          (floor.material as THREE.Material).dispose();
+          backdrop.geometry.dispose();
+          (backdrop.material as THREE.Material).dispose();
+          sideBarA.geometry.dispose();
+          (sideBarA.material as THREE.Material).dispose();
+          sideBarB.geometry.dispose();
+          (sideBarB.material as THREE.Material).dispose();
+          sideBarC.geometry.dispose();
+          (sideBarC.material as THREE.Material).dispose();
+          lens.geometry.dispose();
+          glassMaterial.dispose();
+          slab.geometry.dispose();
+          slabMaterial.dispose();
+        },
+      };
+    },
+  },
+  {
+    step: "Step 22",
+    title: "Surface FX Shadow Lab",
+    summary: "Compare several louder procedural materials under one spotlight so you can judge highlights, shadow contact, and surface identity together.",
+    notes:
+      "This is the shader-to-lookdev bridge: same lights, same floor, very different surfaces. The goal is to feel how roughness, color response, and animated patterning change the read of an object even before you touch geometry.",
+    tags: ["roughnessNode", "clearcoatNode", "Shadowed materials"],
+    cameraPosition: [9.4, 5.1, 8.6],
+    target: [0.2, 1.35, 0],
+    create: ({ scene }) => {
+      scene.background = new THREE.Color("#06101b");
+
+      const state = {
+        animate: true,
+        isolate: "all" as "all" | "metal" | "magma" | "pearl",
+      };
+
+      const floor = new THREE.Mesh(
+        new THREE.PlaneGeometry(13, 13),
+        new THREE.MeshStandardMaterial({
+          color: "#0f2132",
+          roughness: 0.98,
+          metalness: 0.02,
+        }),
+      );
+      floor.rotation.x = -Math.PI / 2;
+      floor.receiveShadow = true;
+
+      const ambient = new THREE.AmbientLight("#86b3ff", 0.18);
+      const key = new THREE.SpotLight("#fff3d8", 28, 28, Math.PI / 5.4, 0.3, 1.1);
+      key.position.set(0.8, 8.2, 5.4);
+      const keyTarget = new THREE.Object3D();
+      keyTarget.position.set(0.2, 1.1, 0);
+      key.target = keyTarget;
+      key.castShadow = true;
+      key.shadow.mapSize.set(2048, 2048);
+      key.shadow.normalBias = 0.14;
+      const fill = new THREE.PointLight("#67d1ff", 10, 16, 2);
+      fill.position.set(-4.8, 3.4, -3);
+      scene.add(floor, ambient, key, keyTarget, fill);
+
+      const pedestalMaterial = new THREE.MeshStandardMaterial({
+        color: "#173149",
+        roughness: 0.84,
+        metalness: 0.06,
+      });
+
+      const pedestalA = new THREE.Mesh(new THREE.CylinderGeometry(0.92, 1.02, 0.32, 36), pedestalMaterial.clone());
+      pedestalA.position.set(-3.1, 0.16, 0.2);
+      pedestalA.castShadow = true;
+      pedestalA.receiveShadow = true;
+
+      const pedestalB = new THREE.Mesh(new THREE.CylinderGeometry(0.92, 1.02, 0.32, 36), pedestalMaterial.clone());
+      pedestalB.position.set(0.2, 0.16, 0.2);
+      pedestalB.castShadow = true;
+      pedestalB.receiveShadow = true;
+
+      const pedestalC = new THREE.Mesh(new THREE.CylinderGeometry(0.92, 1.02, 0.32, 36), pedestalMaterial.clone());
+      pedestalC.position.set(3.45, 0.16, 0.2);
+      pedestalC.castShadow = true;
+      pedestalC.receiveShadow = true;
+
+      const brushedMaterial = new THREE.MeshStandardNodeMaterial({
+        roughness: 0.16,
+        metalness: 0.92,
+      });
+      const brushed = sin(positionLocal.y.mul(18).add(positionLocal.x.mul(8)).add(time.mul(0.9))).mul(0.5).add(0.5);
+      brushedMaterial.colorNode = mix(color("#1c2430"), color("#d6e2f3"), brushed);
+      brushedMaterial.roughnessNode = brushed.mul(0.08).add(0.1);
+      brushedMaterial.metalnessNode = brushed.mul(0.12).add(0.82);
+
+      const magmaMaterial = new THREE.MeshStandardNodeMaterial({
+        roughness: 0.4,
+        metalness: 0.06,
+      });
+      const magmaA = sin(positionLocal.x.mul(6).add(positionLocal.y.mul(4)).add(time.mul(1.8))).mul(0.5).add(0.5);
+      const magmaB = cos(positionLocal.z.mul(7).sub(time.mul(1.1))).mul(0.5).add(0.5);
+      const magma = magmaA.mul(0.58).add(magmaB.mul(0.42)).clamp();
+      magmaMaterial.colorNode = mix(color("#24140f"), color("#ff9347"), magma);
+      magmaMaterial.roughnessNode = mix(vec3(0.92).x, vec3(0.18).x, magma);
+
+      const pearlMaterial = new THREE.MeshPhysicalNodeMaterial();
+      const pearl = sin(positionLocal.x.mul(5).add(positionLocal.z.mul(7)).add(time.mul(1.25))).mul(0.5).add(0.5);
+      pearlMaterial.colorNode = mix(color("#6a7ed8"), color("#eef5ff"), pearl);
+      pearlMaterial.roughnessNode = pearl.mul(0.12).add(0.08);
+      pearlMaterial.clearcoatNode = pearl.mul(0.35).add(0.62);
+      pearlMaterial.iridescenceNode = pearl.mul(0.44).add(0.26);
+      pearlMaterial.metalnessNode = pearl.mul(0.08).add(0.02);
+
+      const brushedMesh = new THREE.Mesh(new THREE.TorusKnotGeometry(0.7, 0.24, 220, 32), brushedMaterial);
+      brushedMesh.position.set(-3.1, 1.3, 0.2);
+      brushedMesh.castShadow = true;
+      brushedMesh.receiveShadow = true;
+
+      const magmaMesh = new THREE.Mesh(new THREE.IcosahedronGeometry(0.92, 5), magmaMaterial);
+      magmaMesh.position.set(0.2, 1.28, 0.2);
+      magmaMesh.castShadow = true;
+      magmaMesh.receiveShadow = true;
+
+      const pearlMesh = new THREE.Mesh(new THREE.SphereGeometry(0.9, 48, 36), pearlMaterial);
+      pearlMesh.position.set(3.45, 1.22, 0.2);
+      pearlMesh.castShadow = true;
+      pearlMesh.receiveShadow = true;
+
+      scene.add(pedestalA, pedestalB, pedestalC, brushedMesh, magmaMesh, pearlMesh);
+
+      const syncIsolation = () => {
+        const all = state.isolate === "all";
+        brushedMesh.visible = all || state.isolate === "metal";
+        pedestalA.visible = brushedMesh.visible;
+        magmaMesh.visible = all || state.isolate === "magma";
+        pedestalB.visible = magmaMesh.visible;
+        pearlMesh.visible = all || state.isolate === "pearl";
+        pedestalC.visible = pearlMesh.visible;
+      };
+
+      syncIsolation();
+
+      return {
+        update: (elapsed) => {
+          syncIsolation();
+
+          if (state.animate) {
+            brushedMesh.rotation.x = elapsed * 0.32;
+            brushedMesh.rotation.y = elapsed * 0.72;
+            magmaMesh.rotation.y = elapsed * 0.38;
+            pearlMesh.rotation.y = -elapsed * 0.3;
+            pearlMesh.position.y = 1.22 + Math.sin(elapsed * 1.1) * 0.12;
+          }
+        },
+        setupGui: ({ gui }) => {
+          const folder = gui.addFolder("Surface FX");
+          folder
+            .add(state, "isolate", {
+              All: "all",
+              Brushed: "metal",
+              Magma: "magma",
+              Pearl: "pearl",
+            })
+            .name("isolate");
+          folder.add(state, "animate").name("animate");
+        },
+        dispose: () => {
+          floor.geometry.dispose();
+          (floor.material as THREE.Material).dispose();
+          pedestalA.geometry.dispose();
+          (pedestalA.material as THREE.Material).dispose();
+          pedestalB.geometry.dispose();
+          (pedestalB.material as THREE.Material).dispose();
+          pedestalC.geometry.dispose();
+          (pedestalC.material as THREE.Material).dispose();
+          brushedMesh.geometry.dispose();
+          brushedMaterial.dispose();
+          magmaMesh.geometry.dispose();
+          magmaMaterial.dispose();
+          pearlMesh.geometry.dispose();
+          pearlMaterial.dispose();
+        },
+      };
+    },
+  },
+  {
+    step: "Step 23",
+    title: "Liquid Metal Reactor",
+    summary: "Push a metal surface into something almost alive: heavy deformation, hot highlights, and a glowing core that grounds the reflections.",
+    notes:
+      "This is a great study in why roughness and reflection breakup matter. The object is still one mesh, but the vertex motion and hot-cold shading make it feel molten instead of static.",
+    tags: ["MeshPhysicalNodeMaterial", "Liquid metal", "Animated reflections"],
+    cameraPosition: [8.8, 5.2, 8.6],
+    target: [0.1, 1.5, 0],
+    create: ({ scene }) => {
+      scene.background = new THREE.Color("#07101a");
+      scene.fog = new THREE.Fog("#07101a", 16, 30);
+
+      const state = {
+        amplitude: 0.42,
+        speed: 1.24,
+        chrome: 0.88,
+        heat: 0.54,
+        animate: true,
+      };
+
+      const ambient = new THREE.AmbientLight("#86b4ff", 0.2);
+      const key = new THREE.DirectionalLight("#fff3dd", 1.6);
+      key.position.set(5.4, 8.1, 4.8);
+      key.castShadow = true;
+      key.shadow.mapSize.set(1024, 1024);
+      key.shadow.camera.left = -8;
+      key.shadow.camera.right = 8;
+      key.shadow.camera.top = 8;
+      key.shadow.camera.bottom = -8;
+      key.shadow.normalBias = 0.14;
+      const rim = new THREE.PointLight("#59d6ff", 12, 16, 2);
+      rim.position.set(-4.2, 3.4, -2.6);
+      const ember = new THREE.PointLight("#ff9b54", 10, 10, 2);
+      ember.position.set(0, 0.6, 0);
+      scene.add(ambient, key, rim, ember);
+
+      const floor = new THREE.Mesh(
+        new THREE.CircleGeometry(7.8, 72),
+        new THREE.MeshStandardMaterial({
+          color: "#0f2031",
+          roughness: 0.95,
+          metalness: 0.04,
+        }),
+      );
+      floor.rotation.x = -Math.PI / 2;
+      floor.position.y = -1.3;
+      floor.receiveShadow = true;
+
+      const pedestal = new THREE.Mesh(
+        new THREE.CylinderGeometry(1.55, 1.82, 0.4, 48),
+        new THREE.MeshStandardMaterial({
+          color: "#162d44",
+          roughness: 0.78,
+          metalness: 0.1,
+        }),
+      );
+      pedestal.position.y = -1.08;
+      pedestal.castShadow = true;
+      pedestal.receiveShadow = true;
+
+      const reactorRing = new THREE.Mesh(
+        new THREE.TorusGeometry(2.05, 0.1, 12, 84),
+        new THREE.MeshStandardMaterial({
+          color: "#233d58",
+          roughness: 0.24,
+          metalness: 0.42,
+          emissive: "#19456a",
+          emissiveIntensity: 0.34,
+        }),
+      );
+      reactorRing.rotation.x = Math.PI / 2;
+      reactorRing.position.y = -0.98;
+      reactorRing.castShadow = true;
+
+      const amplitudeUniform = uniform(state.amplitude, "float").setName("u_amplitude");
+      const chromeUniform = uniform(state.chrome, "float").setName("u_chrome");
+      const heatUniform = uniform(state.heat, "float").setName("u_heat");
+      const stageTimeUniform = uniform(0, "float").setName("u_time");
+
+      const rippleA = sin(positionLocal.y.mul(5.8).add(stageTimeUniform.mul(state.speed)).add(positionLocal.x.mul(2.6)));
+      const rippleB = cos(positionLocal.z.mul(6.6).sub(stageTimeUniform.mul(state.speed * 0.8)).add(positionLocal.x.mul(3.2)));
+      const rippleMix = rippleA.mul(0.58).add(rippleB.mul(0.42));
+      const offset = normalLocal.mul(rippleMix.mul(amplitudeUniform).mul(0.24));
+
+      const liquidMaterial = new THREE.MeshPhysicalNodeMaterial();
+      liquidMaterial.positionNode = positionLocal.add(offset);
+      liquidMaterial.colorNode = mix(
+        mix(color("#0f1520"), color("#d7e1f5"), chromeUniform),
+        color("#ff995c"),
+        rippleA.add(1).mul(0.5).mul(heatUniform).clamp(),
+      );
+      liquidMaterial.roughnessNode = mix(vec3(0.28).x, vec3(0.08).x, rippleB.add(1).mul(0.5).clamp());
+      liquidMaterial.metalnessNode = chromeUniform;
+      liquidMaterial.clearcoatNode = rippleA.add(1).mul(0.5).mul(0.25).add(0.55);
+      liquidMaterial.clearcoatRoughnessNode = rippleB.add(1).mul(0.5).mul(0.08).add(0.06);
+
+      const coreMaterial = new THREE.MeshPhysicalMaterial({
+        color: "#ffe1bb",
+        emissive: "#ff9d54",
+        emissiveIntensity: 1.3,
+        roughness: 0.2,
+        transmission: 0.45,
+        thickness: 0.8,
+      });
+
+      const liquidMesh = new THREE.Mesh(new THREE.IcosahedronGeometry(1.08, 7), liquidMaterial);
+      liquidMesh.position.y = 1.15;
+      liquidMesh.castShadow = true;
+      liquidMesh.receiveShadow = true;
+
+      const coreMesh = new THREE.Mesh(new THREE.SphereGeometry(0.46, 32, 24), coreMaterial);
+      coreMesh.position.y = 1.18;
+      coreMesh.castShadow = true;
+
+      scene.add(floor, pedestal, reactorRing, liquidMesh, coreMesh);
+
+      return {
+        update: (elapsed) => {
+          stageTimeUniform.value = elapsed;
+          amplitudeUniform.value = state.amplitude;
+          chromeUniform.value = state.chrome;
+          heatUniform.value = state.heat;
+
+          if (state.animate) {
+            liquidMesh.rotation.y = elapsed * 0.46;
+            liquidMesh.rotation.x = Math.sin(elapsed * 0.28) * 0.22;
+            coreMesh.position.y = 1.18 + Math.sin(elapsed * 1.6) * 0.08;
+            reactorRing.rotation.z = elapsed * 0.24;
+            ember.intensity = 8 + Math.sin(elapsed * 2.2) * 2.4;
+          }
+        },
+        setupGui: ({ gui }) => {
+          const folder = gui.addFolder("Liquid metal");
+          folder.add(state, "amplitude", 0, 0.8, 0.01).name("amplitude");
+          folder.add(state, "chrome", 0.2, 1, 0.01).name("chrome");
+          folder.add(state, "heat", 0, 1, 0.01).name("heat");
+          folder.add(state, "animate").name("animate");
+        },
+        dispose: () => {
+          floor.geometry.dispose();
+          (floor.material as THREE.Material).dispose();
+          pedestal.geometry.dispose();
+          (pedestal.material as THREE.Material).dispose();
+          reactorRing.geometry.dispose();
+          (reactorRing.material as THREE.Material).dispose();
+          liquidMesh.geometry.dispose();
+          liquidMaterial.dispose();
+          coreMesh.geometry.dispose();
+          coreMaterial.dispose();
+        },
+      };
+    },
+  },
+  {
+    step: "Step 24",
+    title: "Iridescent Crystal Garden",
+    summary: "Stack transmission, iridescence, and sharp spotlight shadows into a crystal cluster that changes color as you orbit it.",
+    notes:
+      "This one is less about blur and more about angle response. Orbit around it and watch the same crystal swing between cool and warm colors as the lighting catches the facets differently. The rear test wall and props are there so you can see the transmission bend, tint, and split the scene behind the crystals.",
+    tags: ["Iridescence", "Transmission", "Refraction target"],
+    cameraPosition: [9.2, 5.6, 9.2],
+    target: [0.2, 1.8, -0.2],
+    create: ({ scene, renderer }) => {
+      scene.background = new THREE.Color("#c8ced8");
+      scene.fog = new THREE.Fog("#c8ced8", 16, 32);
+      renderer.toneMappingExposure = 0.96;
+
+      const createRefractionBackdropTexture = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = 768;
+        canvas.height = 384;
+
+        const context = canvas.getContext("2d");
+
+        if (!context) {
+          throw new Error("Could not create 2D canvas context");
+        }
+
+        const gradient = context.createLinearGradient(0, 0, canvas.width, canvas.height);
+        gradient.addColorStop(0, "#e6edf7");
+        gradient.addColorStop(1, "#bccbdd");
+        context.fillStyle = gradient;
+        context.fillRect(0, 0, canvas.width, canvas.height);
+
+        context.fillStyle = "#182636";
+        context.fillRect(32, 32, canvas.width - 64, canvas.height - 64);
+
+        const stripeColors = ["#ff8f6b", "#f5f8ff", "#74dfff", "#ffd96d", "#8ce2a4", "#d4c1ff"];
+        stripeColors.forEach((stripeColor, index) => {
+          context.fillStyle = stripeColor;
+          context.fillRect(76 + index * 98, 74, 56, 236);
+        });
+
+        context.strokeStyle = "rgba(255, 255, 255, 0.82)";
+        context.lineWidth = 8;
+        context.beginPath();
+        context.moveTo(56, 300);
+        context.lineTo(706, 96);
+        context.stroke();
+
+        context.strokeStyle = "rgba(116, 223, 255, 0.9)";
+        context.lineWidth = 18;
+        context.beginPath();
+        context.arc(588, 186, 74, 0, Math.PI * 2);
+        context.stroke();
+
+        context.fillStyle = "#fff6cc";
+        context.beginPath();
+        context.arc(164, 124, 36, 0, Math.PI * 2);
+        context.fill();
+
+        context.fillStyle = "#74dfff";
+        context.fillRect(266, 226, 174, 48);
+
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.colorSpace = THREE.SRGBColorSpace;
+        return texture;
+      };
+
+      const roomEnvironment = new RoomEnvironment();
+      const pmremGenerator = new THREE.PMREMGenerator(renderer);
+      const environmentTarget = pmremGenerator.fromScene(roomEnvironment, 0.03);
+      scene.environment = environmentTarget.texture;
+      const backdropTexture = createRefractionBackdropTexture();
+
+      const floor = new THREE.Mesh(
+        new THREE.PlaneGeometry(12, 12),
+        new THREE.MeshPhysicalMaterial({
+          color: "#b9c3cf",
+          roughness: 0.9,
+          metalness: 0.02,
+          clearcoat: 0.04,
+        }),
+      );
+      floor.rotation.x = -Math.PI / 2;
+      floor.receiveShadow = true;
+
+      const ambient = new THREE.AmbientLight("#89b4ff", 0.24);
+      const key = new THREE.SpotLight("#fff3dc", 26, 28, Math.PI / 5, 0.3, 1.12);
+      key.position.set(2.4, 8.8, 5.6);
+      const keyTarget = new THREE.Object3D();
+      keyTarget.position.set(0.2, 1.5, 0);
+      key.target = keyTarget;
+      key.castShadow = true;
+      key.shadow.mapSize.set(2048, 2048);
+      key.shadow.normalBias = 0.12;
+      const fill = new THREE.PointLight("#7de0ff", 8, 16, 2);
+      fill.position.set(-4.4, 3.2, -2.8);
+      scene.add(floor, ambient, key, keyTarget, fill);
+
+      const state = {
+        animate: true,
+        iridescence: 0.92,
+        roughness: 0.14,
+        thickness: 1.6,
+        showBackdrop: true,
+      };
+
+      const crystalMaterial = new THREE.MeshPhysicalNodeMaterial();
+      const sparkle = sin(positionLocal.y.mul(9).add(positionLocal.x.mul(6)).add(time.mul(1.2))).mul(0.5).add(0.5);
+      crystalMaterial.colorNode = mix(color("#c8e7ff"), color("#fef4ff"), sparkle);
+      crystalMaterial.roughnessNode = sparkle.mul(0.08).add(0.06);
+      crystalMaterial.transmission = 1;
+      crystalMaterial.thickness = state.thickness;
+      crystalMaterial.ior = 1.18;
+      crystalMaterial.clearcoat = 0.38;
+      crystalMaterial.clearcoatRoughness = 0.08;
+      crystalMaterial.iridescence = state.iridescence;
+
+      const createCrystal = (height: number) =>
+        new THREE.CylinderGeometry(0.42, 0.92, height, 6, 8, false);
+
+      const crystalA = new THREE.Mesh(createCrystal(3.2), crystalMaterial);
+      crystalA.position.set(-0.92, 1.46, 0.2);
+      crystalA.rotation.set(0.12, 0.32, 0.06);
+      crystalA.castShadow = true;
+      crystalA.receiveShadow = true;
+
+      const crystalB = new THREE.Mesh(createCrystal(2.8), crystalMaterial);
+      crystalB.position.set(0.55, 1.28, -0.22);
+      crystalB.rotation.set(-0.08, -0.22, -0.08);
+      crystalB.castShadow = true;
+      crystalB.receiveShadow = true;
+
+      const crystalC = new THREE.Mesh(createCrystal(2.35), crystalMaterial);
+      crystalC.position.set(1.48, 1.1, 0.52);
+      crystalC.rotation.set(0.14, 0.56, 0.12);
+      crystalC.castShadow = true;
+      crystalC.receiveShadow = true;
+
+      const base = new THREE.Mesh(
+        new THREE.CylinderGeometry(1.8, 2.1, 0.42, 48),
+        new THREE.MeshStandardMaterial({
+          color: "#3d4b5f",
+          roughness: 0.82,
+          metalness: 0.08,
+        }),
+      );
+      base.position.y = 0.2;
+      base.castShadow = true;
+      base.receiveShadow = true;
+
+      const backdrop = new THREE.Mesh(
+        new THREE.PlaneGeometry(6.6, 3.8),
+        new THREE.MeshStandardMaterial({
+          map: backdropTexture,
+          roughness: 0.86,
+          metalness: 0.04,
+          emissive: "#16283c",
+          emissiveIntensity: 0.16,
+        }),
+      );
+      backdrop.position.set(0.1, 2.05, -2.28);
+      backdrop.rotation.y = -0.1;
+      backdrop.receiveShadow = true;
+
+      const rearOrb = new THREE.Mesh(
+        new THREE.SphereGeometry(0.48, 32, 24),
+        new THREE.MeshStandardMaterial({
+          color: "#ff9e77",
+          roughness: 0.26,
+          metalness: 0.08,
+          emissive: "#ff8454",
+          emissiveIntensity: 0.18,
+        }),
+      );
+      rearOrb.position.set(-1.38, 1.08, -1.72);
+      rearOrb.castShadow = true;
+      rearOrb.receiveShadow = true;
+
+      const rearColumn = new THREE.Mesh(
+        new THREE.BoxGeometry(0.48, 1.58, 0.48),
+        new THREE.MeshStandardMaterial({
+          color: "#7ce5d0",
+          roughness: 0.34,
+          metalness: 0.06,
+        }),
+      );
+      rearColumn.position.set(1.82, 1.1, -1.94);
+      rearColumn.castShadow = true;
+      rearColumn.receiveShadow = true;
+
+      const rearRing = new THREE.Mesh(
+        new THREE.TorusGeometry(0.56, 0.12, 18, 48),
+        new THREE.MeshStandardMaterial({
+          color: "#f3f7ff",
+          roughness: 0.2,
+          metalness: 0.42,
+        }),
+      );
+      rearRing.position.set(0.66, 1.96, -1.64);
+      rearRing.rotation.set(0.48, 0.12, 0.82);
+      rearRing.castShadow = true;
+      rearRing.receiveShadow = true;
+
+      scene.add(base, backdrop, rearOrb, rearColumn, rearRing, crystalA, crystalB, crystalC);
+
+      return {
+        update: (elapsed) => {
+          crystalMaterial.iridescence = state.iridescence;
+          crystalMaterial.roughness = state.roughness;
+          crystalMaterial.thickness = state.thickness;
+          backdrop.visible = state.showBackdrop;
+          rearOrb.visible = state.showBackdrop;
+          rearColumn.visible = state.showBackdrop;
+          rearRing.visible = state.showBackdrop;
+
+          if (state.animate) {
+            crystalA.rotation.y = 0.32 + Math.sin(elapsed * 0.42) * 0.12;
+            crystalB.rotation.y = -0.22 - Math.sin(elapsed * 0.35) * 0.14;
+            crystalC.rotation.y = 0.56 + Math.sin(elapsed * 0.48) * 0.1;
+            fill.position.x = -4.4 + Math.cos(elapsed * 0.54) * 0.8;
+            rearOrb.position.y = 1.08 + Math.sin(elapsed * 1.3) * 0.12;
+            rearColumn.rotation.y = elapsed * 0.42;
+            rearRing.rotation.z = 0.82 + elapsed * 0.54;
+          }
+        },
+        setupGui: ({ gui }) => {
+          const folder = gui.addFolder("Crystal");
+          folder.add(state, "iridescence", 0, 1, 0.01).name("iridescence");
+          folder.add(state, "roughness", 0, 0.4, 0.01).name("roughness");
+          folder.add(state, "thickness", 0.2, 2.4, 0.01).name("thickness");
+          folder.add(state, "showBackdrop").name("rear props");
+          folder.add(state, "animate").name("animate");
+        },
+        dispose: () => {
+          scene.environment = null;
+          environmentTarget.dispose();
+          pmremGenerator.dispose();
+          roomEnvironment.dispose();
+          backdropTexture.dispose();
+          floor.geometry.dispose();
+          (floor.material as THREE.Material).dispose();
+          base.geometry.dispose();
+          (base.material as THREE.Material).dispose();
+          backdrop.geometry.dispose();
+          (backdrop.material as THREE.Material).dispose();
+          rearOrb.geometry.dispose();
+          (rearOrb.material as THREE.Material).dispose();
+          rearColumn.geometry.dispose();
+          (rearColumn.material as THREE.Material).dispose();
+          rearRing.geometry.dispose();
+          (rearRing.material as THREE.Material).dispose();
+          crystalA.geometry.dispose();
+          crystalB.geometry.dispose();
+          crystalC.geometry.dispose();
+          crystalMaterial.dispose();
+        },
+      };
+    },
+  },
+  {
+    step: "Step 25",
+    title: "Solar Rift Gate",
+    summary: "Split a pair of monoliths open and shade the energy sheet between them so the scene feels like a real portal instead of a floating effect toy.",
+    notes:
+      "The monoliths do the grounding work here: they cast the shadows and give the eye something hard and heavy to trust. The animated sheet, arcs, and shards can go wilder because the scene still feels physically anchored.",
+    tags: ["Portal shader", "positionNode", "Shadowed monoliths"],
+    cameraPosition: [8.8, 4.8, 8.8],
+    target: [0, 1.4, 0],
+    create: ({ scene }) => {
+      scene.background = new THREE.Color("#06111b");
+      scene.fog = new THREE.Fog("#06111b", 16, 30);
+
+      const state = {
+        animate: true,
+        aperture: 0.62,
+        turbulence: 0.44,
+        glow: 0.82,
+        shardSpin: 0.86,
+      };
+
+      const ambient = new THREE.AmbientLight("#80adff", 0.18);
+      const spot = new THREE.SpotLight("#fff4de", 28, 28, Math.PI / 5.1, 0.32, 1.12);
+      spot.position.set(3.8, 8.4, 5.2);
+      const spotTarget = new THREE.Object3D();
+      spotTarget.position.set(0, 1.2, 0);
+      spot.target = spotTarget;
+      spot.castShadow = true;
+      spot.shadow.mapSize.set(1024, 1024);
+      spot.shadow.normalBias = 0.14;
+      const fill = new THREE.PointLight("#49d0ff", 9, 18, 2);
+      fill.position.set(-4.4, 3.1, -3.2);
+      const riftLight = new THREE.PointLight("#ff8f4d", 10, 14, 2);
+      riftLight.position.set(0, 1.2, 0);
+      scene.add(ambient, spot, spotTarget, fill, riftLight);
+
+      const floor = new THREE.Mesh(
+        new THREE.CircleGeometry(7.4, 72),
+        new THREE.MeshStandardMaterial({
+          color: "#0f2132",
+          roughness: 0.98,
+          metalness: 0.02,
+        }),
+      );
+      floor.rotation.x = -Math.PI / 2;
+      floor.position.y = -1.32;
+      floor.receiveShadow = true;
+
+      const pedestal = new THREE.Mesh(
+        new THREE.CylinderGeometry(1.9, 2.22, 0.52, 56),
+        new THREE.MeshStandardMaterial({
+          color: "#153049",
+          roughness: 0.82,
+          metalness: 0.08,
+        }),
+      );
+      pedestal.position.y = -1.08;
+      pedestal.castShadow = true;
+      pedestal.receiveShadow = true;
+
+      const baseRing = new THREE.Mesh(
+        new THREE.TorusGeometry(2.28, 0.08, 12, 96),
+        new THREE.MeshStandardMaterial({
+          color: "#203f5e",
+          roughness: 0.24,
+          metalness: 0.38,
+          emissive: "#204d76",
+          emissiveIntensity: 0.34,
+        }),
+      );
+      baseRing.rotation.x = Math.PI / 2;
+      baseRing.position.y = -0.96;
+      baseRing.castShadow = true;
+
+      const leftPillar = new THREE.Mesh(
+        new THREE.BoxGeometry(0.82, 3.9, 1.12),
+        new THREE.MeshStandardMaterial({
+          color: "#1a334a",
+          roughness: 0.72,
+          metalness: 0.14,
+          emissive: "#102536",
+          emissiveIntensity: 0.16,
+        }),
+      );
+      leftPillar.position.set(-0.96, 0.92, 0.08);
+      leftPillar.rotation.set(0.02, -0.14, 0.08);
+      leftPillar.castShadow = true;
+      leftPillar.receiveShadow = true;
+
+      const rightPillar = new THREE.Mesh(
+        new THREE.BoxGeometry(0.82, 4.1, 1.12),
+        new THREE.MeshStandardMaterial({
+          color: "#1a334a",
+          roughness: 0.72,
+          metalness: 0.14,
+          emissive: "#102536",
+          emissiveIntensity: 0.16,
+        }),
+      );
+      rightPillar.position.set(1.02, 0.96, -0.02);
+      rightPillar.rotation.set(-0.04, 0.16, -0.08);
+      rightPillar.castShadow = true;
+      rightPillar.receiveShadow = true;
+
+      const apertureUniform = uniform(state.aperture, "float").setName("u_aperture");
+      const turbulenceUniform = uniform(state.turbulence, "float").setName("u_turbulence");
+      const glowUniform = uniform(state.glow, "float").setName("u_glow");
+      const stageTimeUniform = uniform(0, "float").setName("u_time");
+
+      const slit = uv().x.sub(0.5).abs().mul(2).oneMinus().clamp();
+      const slitCore = slit.pow(4);
+      const waveA = sin(uv().y.mul(18).add(stageTimeUniform.mul(3.1))).mul(0.5).add(0.5);
+      const waveB = cos(uv().x.mul(12).sub(stageTimeUniform.mul(2.4)).add(uv().y.mul(9))).mul(0.5).add(0.5);
+      const riftMaterial = new THREE.MeshStandardNodeMaterial({
+        roughness: 0.18,
+        metalness: 0.06,
+        side: THREE.DoubleSide,
+      });
+      riftMaterial.positionNode = positionLocal.add(
+        vec3(
+          sin(positionLocal.y.mul(4.8).add(stageTimeUniform.mul(2.2))).mul(turbulenceUniform).mul(slit).mul(0.08),
+          0,
+          sin(positionLocal.y.mul(6.2).sub(stageTimeUniform.mul(3))).mul(apertureUniform).mul(slitCore).mul(0.34),
+        ),
+      );
+      riftMaterial.colorNode = mix(
+        mix(color("#10264b"), color("#72e4ff"), waveA.mul(glowUniform).clamp()),
+        color("#ff9b54"),
+        slitCore.mul(0.58).add(waveB.mul(0.18)).clamp(),
+      );
+
+      const rift = new THREE.Mesh(new THREE.PlaneGeometry(1.42, 3.52, 56, 128), riftMaterial);
+      rift.position.set(0.02, 0.92, 0.06);
+      rift.rotation.y = 0.02;
+      rift.receiveShadow = true;
+
+      const arcA = new THREE.Mesh(
+        new THREE.TorusGeometry(1.22, 0.06, 12, 96, Math.PI * 1.12),
+        new THREE.MeshStandardMaterial({
+          color: "#e8fbff",
+          emissive: "#6ee6ff",
+          emissiveIntensity: 1.12,
+          roughness: 0.14,
+          metalness: 0.12,
+        }),
+      );
+      arcA.position.set(0, 1.2, 0.02);
+      arcA.rotation.set(1.22, 0.18, 0.42);
+
+      const arcB = new THREE.Mesh(
+        new THREE.TorusGeometry(0.86, 0.05, 12, 84, Math.PI * 1.08),
+        new THREE.MeshStandardMaterial({
+          color: "#ffe9cf",
+          emissive: "#ffb36a",
+          emissiveIntensity: 1.04,
+          roughness: 0.14,
+          metalness: 0.12,
+        }),
+      );
+      arcB.position.set(0.06, 1.78, 0.1);
+      arcB.rotation.set(0.42, 0.86, -0.28);
+
+      const shardMaterial = new THREE.MeshStandardMaterial({
+        color: "#d8f7ff",
+        emissive: "#67dcff",
+        emissiveIntensity: 0.72,
+        roughness: 0.12,
+        metalness: 0.18,
+      });
+      const shards = Array.from({ length: 5 }, (_, index) => {
+        const shard = new THREE.Mesh(new THREE.OctahedronGeometry(0.16 + index * 0.025, 0), shardMaterial.clone());
+        shard.castShadow = true;
+        return shard;
+      });
+
+      scene.add(floor, pedestal, baseRing, leftPillar, rightPillar, rift, arcA, arcB, ...shards);
+
+      return {
+        update: (elapsed) => {
+          stageTimeUniform.value = elapsed;
+          apertureUniform.value = state.aperture;
+          turbulenceUniform.value = state.turbulence;
+          glowUniform.value = state.glow;
+
+          if (state.animate) {
+            baseRing.rotation.z = elapsed * 0.18;
+            arcA.rotation.z = 0.42 + elapsed * 0.58;
+            arcB.rotation.x = 0.42 + elapsed * 0.74;
+            rift.rotation.y = Math.sin(elapsed * 0.36) * 0.08;
+            riftLight.intensity = 8 + Math.sin(elapsed * 4.2) * 2.2;
+            riftLight.position.y = 1.12 + Math.sin(elapsed * 2.3) * 0.12;
+
+            shards.forEach((shard, index) => {
+              const angle = elapsed * (state.shardSpin + index * 0.08) + index * 1.2;
+              const radius = 1.24 + index * 0.16;
+              shard.position.set(Math.cos(angle) * radius, 1.16 + Math.sin(elapsed * 1.4 + index) * 0.4, Math.sin(angle) * radius * 0.38);
+              shard.rotation.x = elapsed * (0.8 + index * 0.1);
+              shard.rotation.y = elapsed * (1 + index * 0.12);
+            });
+          }
+        },
+        setupGui: ({ gui }) => {
+          const folder = gui.addFolder("Rift");
+          folder.add(state, "aperture", 0.1, 1, 0.01).name("aperture");
+          folder.add(state, "turbulence", 0, 1, 0.01).name("turbulence");
+          folder.add(state, "glow", 0, 1.2, 0.01).name("glow");
+          folder.add(state, "shardSpin", 0, 2, 0.01).name("shard spin");
+          folder.add(state, "animate").name("animate");
+        },
+        dispose: () => {
+          floor.geometry.dispose();
+          (floor.material as THREE.Material).dispose();
+          pedestal.geometry.dispose();
+          (pedestal.material as THREE.Material).dispose();
+          baseRing.geometry.dispose();
+          (baseRing.material as THREE.Material).dispose();
+          leftPillar.geometry.dispose();
+          (leftPillar.material as THREE.Material).dispose();
+          rightPillar.geometry.dispose();
+          (rightPillar.material as THREE.Material).dispose();
+          rift.geometry.dispose();
+          riftMaterial.dispose();
+          arcA.geometry.dispose();
+          (arcA.material as THREE.Material).dispose();
+          arcB.geometry.dispose();
+          (arcB.material as THREE.Material).dispose();
+
+          for (const shard of shards) {
+            shard.geometry.dispose();
+            (shard.material as THREE.Material).dispose();
+          }
+        },
+      };
+    },
+  },
 ];
 
 app.innerHTML = `
@@ -4387,7 +6179,8 @@ app.innerHTML = `
         Each card is its own orbitable scene so you can inspect one concept at a time, moving from a single triangle
         up through indexed geometry, UVs, lighting, hierarchy, instancing, storage buffers, compute-driven animation,
         particles, morph targets, spline geometry, node-based shaders, animated surfaces, skinning, procedural terrain,
-        and then into a run of advanced GPU labs focused on workgroups, compute-authored geometry, and storage textures.
+        and then into a run of advanced GPU labs focused on workgroups, shader-stage thinking, compute-authored geometry,
+        and storage textures.
         Every card now carries an embedded IMGUI so you can flip wireframes, switch between orbit and FPS camera modes,
         and then dig into example-specific controls without leaving the scene.
       </p>
@@ -4410,7 +6203,7 @@ app.innerHTML = `
     <section id="examples" class="examples-grid"></section>
     <p class="footer-note">
       Tip: start by toggling wireframe and swapping between orbit and FPS in each IMGUI. The storage-buffer,
-      compute-swarm, workgroup-prism, compute-heightfield, and storage-texture pipeline cards are the most
+      compute-swarm, workgroup-prism, WGSL shader lab, compute-heightfield, and storage-texture pipeline cards are the most
       WebGPU-specific steps before jumping into custom WGSL, GPGPU, or renderer internals.
     </p>
   </main>
@@ -4469,7 +6262,14 @@ const mountedExamples = await Promise.all(
   ),
 );
 
+let renderLoopActive = true;
+let renderFrameHandle = 0;
+
 const renderLoop = () => {
+  if (!renderLoopActive) {
+    return;
+  }
+
   timer.update();
   const delta = timer.getDelta();
   const elapsed = timer.getElapsed();
@@ -4483,6 +6283,9 @@ const renderLoop = () => {
     try {
       mounted.fpsSmoothed = mounted.fpsSmoothed === 0 ? fps : THREE.MathUtils.lerp(mounted.fpsSmoothed, fps, 0.16);
       mounted.fpsLabel.textContent = `${Math.round(mounted.fpsSmoothed)} FPS`;
+      if (mounted.sizeDirty) {
+        mounted.syncSize();
+      }
       mounted.cameraRig.update(delta);
       mounted.wireframeController.update();
       mounted.update?.(elapsed, delta);
@@ -4502,23 +6305,32 @@ const renderLoop = () => {
     }
   }
 
-  requestAnimationFrame(renderLoop);
+  renderFrameHandle = requestAnimationFrame(renderLoop);
 };
 
-requestAnimationFrame(renderLoop);
+renderFrameHandle = requestAnimationFrame(renderLoop);
 
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
-    for (const mounted of mountedExamples) {
-      mounted.resizeObserver.disconnect();
-      mounted.guiFieldObserver.disconnect();
-      mounted.cameraRig.dispose();
-      mounted.controls.dispose();
-      mounted.wireframeController.dispose();
-      mounted.gui.destroy();
-      mounted.dispose?.();
-      mounted.renderer.dispose();
-    }
+    renderLoopActive = false;
+    cancelAnimationFrame(renderFrameHandle);
+
+    const teardownExamples = () => {
+      for (const mounted of mountedExamples) {
+        window.removeEventListener("resize", mounted.handleWindowResize);
+        mounted.guiFieldObserver.disconnect();
+        mounted.cameraRig.dispose();
+        mounted.controls.dispose();
+        mounted.wireframeController.dispose();
+        mounted.gui.destroy();
+        mounted.dispose?.();
+        mounted.renderer.dispose();
+      }
+    };
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(teardownExamples);
+    });
   });
 }
 
@@ -4539,8 +6351,10 @@ async function mountExample(card: HTMLElement, example: ExampleDefinition): Prom
     antialias: true,
     alpha: false,
   });
+  const initialWidth = Math.max(host.clientWidth, 1);
+  const initialHeight = Math.max(host.clientHeight, 1);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-  renderer.setSize(Math.max(host.clientWidth, 1), Math.max(host.clientHeight, 1), false);
+  renderer.setSize(initialWidth, initialHeight, false);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.1;
@@ -4613,26 +6427,16 @@ async function mountExample(card: HTMLElement, example: ExampleDefinition): Prom
   );
   setWireframe(viewState.wireframe);
 
-  const resize = () => {
-    const width = Math.max(host.clientWidth, 1);
-    const height = Math.max(host.clientHeight, 1);
-    camera.aspect = width / height;
-    camera.updateProjectionMatrix();
-    renderer.setSize(width, height, false);
-  };
-
-  const resizeObserver = new ResizeObserver(resize);
-  resizeObserver.observe(host);
-  resize();
-
-  return {
+  const mounted: MountedExample = {
     card,
     host,
     scene,
     camera,
     renderer,
     controls,
-    resizeObserver,
+    handleWindowResize: () => {
+      mounted.sizeDirty = true;
+    },
     guiFieldObserver,
     cameraRig,
     gui,
@@ -4640,8 +6444,32 @@ async function mountExample(card: HTMLElement, example: ExampleDefinition): Prom
     fpsLabel,
     fpsSmoothed: 0,
     failed: false,
+    sizeDirty: false,
+    viewportWidth: initialWidth,
+    viewportHeight: initialHeight,
+    syncSize: () => {
+      const width = Math.max(host.clientWidth, 1);
+      const height = Math.max(host.clientHeight, 1);
+      mounted.sizeDirty = false;
+
+      if (width === mounted.viewportWidth && height === mounted.viewportHeight) {
+        return;
+      }
+
+      mounted.viewportWidth = width;
+      mounted.viewportHeight = height;
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+      renderer.setSize(width, height, false);
+    },
     ...runtime,
   };
+
+  camera.aspect = initialWidth / initialHeight;
+  camera.updateProjectionMatrix();
+  window.addEventListener("resize", mounted.handleWindowResize);
+
+  return mounted;
 }
 
 function disposeSceneResources(meshes: THREE.Object3D[]): void {
