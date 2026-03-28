@@ -1,5 +1,6 @@
 import "./style.css";
 
+import type { HouseLabHandle } from "./house-lab";
 import * as THREE from "three/webgpu";
 import WebGPU from "three/addons/capabilities/WebGPU.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
@@ -10,6 +11,7 @@ import { SimplexNoise } from "three/addons/math/SimplexNoise.js";
 import { Fn, color, cos, instanceIndex, instancedArray, localId, mix, normalLocal, positionLocal, sin, textureStore, time, uniform, uvec2, uv, vec3, vec4, workgroupId } from "three/tsl";
 
 type CameraMode = "orbit" | "fps";
+type AppTab = "gallery" | "house";
 
 type ExampleViewState = {
   wireframe: boolean;
@@ -83,6 +85,8 @@ const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) {
   throw new Error("Could not find #app");
 }
+
+const prefersTouchInput = window.matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
 
 function createUvReferenceTexture(): THREE.CanvasTexture {
   const canvas = document.createElement("canvas");
@@ -3102,8 +3106,10 @@ const examples: ExampleDefinition[] = [
       let activeAction: THREE.AnimationAction | null = null;
       let clips: THREE.AnimationClip[] = [];
       const skinnedWireframeOverlays: SkinnedWireframeOverlay[] = [];
+      let skinFolder: GUI | null = null;
       let clipController: (ReturnType<GUI["add"]> & {
         options?: (values: string[] | Record<string, string>) => unknown;
+        setValue?: (value: string) => unknown;
       }) | null = null;
 
       const disposeCharacter = (root: THREE.Object3D) => {
@@ -3120,6 +3126,31 @@ const examples: ExampleDefinition[] = [
         }
       };
 
+      const rebuildClipController = () => {
+        if (!skinFolder) {
+          return;
+        }
+
+        const clipNames = clips.length > 0 ? clips.map((clip) => clip.name) : ["Loading..."];
+
+        if (!clipNames.includes(skinState.clip)) {
+          skinState.clip = clipNames[0];
+        }
+
+        if (!clipController) {
+          clipController = skinFolder.add(skinState, "clip", clipNames).name("clip");
+          clipController.onChange((value: string) => playClip(value));
+        } else if (typeof clipController.options === "function") {
+          clipController.options(clipNames);
+        }
+
+        if (typeof clipController.setValue === "function") {
+          clipController.setValue(skinState.clip);
+        } else {
+          clipController.updateDisplay();
+        }
+      };
+
       const playClip = (clipName: string) => {
         if (!mixer || clips.length === 0) {
           return;
@@ -3131,15 +3162,13 @@ const examples: ExampleDefinition[] = [
           return;
         }
 
+        mixer.stopAllAction();
         const nextAction = mixer.clipAction(clip);
         nextAction.enabled = true;
         nextAction.reset();
-        nextAction.fadeIn(0.22);
+        nextAction.setEffectiveTimeScale(1);
+        nextAction.setEffectiveWeight(1);
         nextAction.play();
-
-        if (activeAction && activeAction !== nextAction) {
-          activeAction.fadeOut(0.22);
-        }
 
         activeAction = nextAction;
         skinState.clip = clip.name;
@@ -3197,10 +3226,7 @@ const examples: ExampleDefinition[] = [
 
           mixer = new THREE.AnimationMixer(model);
           clips = gltf.animations;
-
-          if (clipController?.options) {
-            clipController.options(clips.map((clip) => clip.name));
-          }
+          rebuildClipController();
 
           const preferredClip =
             clips.find((clip) => /walk/i.test(clip.name)) ??
@@ -3256,12 +3282,11 @@ const examples: ExampleDefinition[] = [
           }
         },
         setupGui: ({ gui }) => {
-          const folder = gui.addFolder("Skinning");
-          folder.add(skinState, "showSkeleton").name("skeleton").onChange(syncSkeleton);
-          clipController = folder.add(skinState, "clip", ["Loading..."]).name("clip");
-          clipController.onChange((value: string) => playClip(value));
-          folder.add(skinState, "timeScale", 0, 2, 0.01).name("time scale");
-          folder.add(skinState, "turntable").name("turntable");
+          skinFolder = gui.addFolder("Skinning");
+          skinFolder.add(skinState, "showSkeleton").name("skeleton").onChange(syncSkeleton);
+          rebuildClipController();
+          skinFolder.add(skinState, "timeScale", 0, 2, 0.01).name("time scale");
+          skinFolder.add(skinState, "turntable").name("turntable");
         },
         dispose: () => {
           disposed = true;
@@ -6307,6 +6332,15 @@ const examples: ExampleDefinition[] = [
   },
 ];
 
+const primaryControlsTitle = prefersTouchInput ? "Controls: Mobile" : "Controls: Desktop";
+const primaryControlsText = prefersTouchInput
+  ? "Orbit uses one finger rotate, two finger pinch zoom, and two finger drag pan. FPS uses one finger look, two finger drag strafe/pan, and pinch to move forward or back."
+  : "Orbit uses left drag to rotate, middle mouse or wheel to zoom, and right mouse to pan. FPS uses drag to look, right mouse to strafe/pan, wheel to move along view, and WASD with Q/E to move.";
+const secondaryControlsTitle = prefersTouchInput ? "Also on desktop" : "Also on mobile";
+const secondaryControlsText = prefersTouchInput
+  ? "Desktop orbit uses left drag rotate, middle mouse or wheel zoom, and right mouse pan. Desktop FPS uses drag to look, right mouse strafe/pan, wheel move along view, and WASD with Q/E."
+  : "Mobile orbit uses one finger rotate, two finger pinch zoom, and two finger drag pan. Mobile FPS uses one finger look, two finger drag strafe/pan, and pinch to move forward or back.";
+
 app.innerHTML = `
   <main class="page-shell">
     <section class="hero">
@@ -6321,10 +6355,21 @@ app.innerHTML = `
         Every card now carries an embedded IMGUI so you can flip wireframes, switch between orbit and FPS camera modes,
         and then dig into example-specific controls without leaving the scene.
       </p>
+      <div class="controls-banner">
+        <div class="controls-banner-primary">
+          <span class="controls-badge">${prefersTouchInput ? "Touch detected" : "Mouse + keyboard"}</span>
+          <strong>${primaryControlsTitle}</strong>
+          <p>${primaryControlsText}</p>
+        </div>
+        <div class="controls-banner-secondary">
+          <strong>${secondaryControlsTitle}</strong>
+          <p>${secondaryControlsText}</p>
+        </div>
+      </div>
       <div class="hero-grid">
         <div class="hero-panel">
-          <strong>How to use it</strong>
-          <p>Drag to orbit, scroll to zoom, pan with right mouse, or switch to FPS and move with WASD plus Q/E vertical motion.</p>
+          <strong>Switch modes in Debug</strong>
+          <p>Every card starts in orbit mode. Open <code>Debug -> View -> camera</code> to swap between Orbit and FPS without snapping the camera back to a default pose.</p>
         </div>
         <div class="hero-panel">
           <strong>Why this progression</strong>
@@ -6337,20 +6382,31 @@ app.innerHTML = `
       </div>
       <div id="runtime-status"></div>
     </section>
-    <section id="examples" class="examples-grid"></section>
-    <p class="footer-note">
-      Tip: start by toggling wireframe and swapping between orbit and FPS in each IMGUI. The storage-buffer,
-      compute-swarm, workgroup-prism, WGSL shader lab, compute-heightfield, and storage-texture pipeline cards are the most
-      WebGPU-specific steps before jumping into custom WGSL, GPGPU, or renderer internals.
-    </p>
+    <nav class="app-tabs" aria-label="Application mode">
+      <button class="app-tab is-active" data-app-tab="gallery" type="button" aria-selected="true">Learning Gallery</button>
+      <button class="app-tab" data-app-tab="house" type="button" aria-selected="false">House Lab</button>
+    </nav>
+    <section class="app-panel app-panel-active" data-app-panel="gallery">
+      <section id="examples" class="examples-grid"></section>
+      <p class="footer-note">
+        Learning path: once you are comfortable with the early geometry and lighting cards, the storage-buffer,
+        compute-swarm, workgroup-prism, WGSL shader lab, compute-heightfield, and storage-texture pipeline cards are the most
+        WebGPU-specific steps before jumping into custom WGSL, GPGPU, or renderer internals.
+      </p>
+    </section>
+    <section class="app-panel" data-app-panel="house" hidden></section>
   </main>
 `;
 
 const statusTarget = document.querySelector<HTMLDivElement>("#runtime-status");
 const examplesTarget = document.querySelector<HTMLDivElement>("#examples");
+const galleryPanel = document.querySelector<HTMLElement>("[data-app-panel='gallery']");
+const housePanel = document.querySelector<HTMLElement>("[data-app-panel='house']");
+const appTabButtons = [...document.querySelectorAll<HTMLButtonElement>("[data-app-tab]")];
+const pageShell = document.querySelector<HTMLElement>(".page-shell");
 const hasNativeWebGPU = WebGPU.isAvailable();
 
-if (!statusTarget || !examplesTarget) {
+if (!statusTarget || !examplesTarget || !galleryPanel || !housePanel || !pageShell) {
   throw new Error("Could not find page targets");
 }
 
@@ -6400,6 +6456,10 @@ const mountedExamples: Array<MountedExample | null> = hasNativeWebGPU
   ? await Promise.all(exampleCards.map((card, index) => mountExample(card, examples[index])))
   : new Array(exampleCards.length).fill(null);
 const mountingExamples = new Map<number, Promise<void>>();
+let activeAppTab: AppTab = "gallery";
+let houseLabHandle: HouseLabHandle | null = null;
+let houseLabMounting: Promise<void> | null = null;
+let appDisposed = false;
 
 const disposeMountedExample = (mounted: MountedExample) => {
   window.removeEventListener("resize", mounted.handleWindowResize);
@@ -6421,6 +6481,11 @@ const ensureExampleMounted = async (index: number) => {
 
   const promise = mountExample(exampleCards[index], examples[index])
     .then((mounted) => {
+      if (!hasNativeWebGPU && activeAppTab !== "gallery") {
+        disposeMountedExample(mounted);
+        return;
+      }
+
       mountedExamples[index] = mounted;
     })
     .catch((error) => {
@@ -6490,6 +6555,107 @@ const reconcileFallbackExamples = () => {
   }
 };
 
+const syncActivePanel = () => {
+  pageShell.classList.toggle("page-shell-house", activeAppTab === "house");
+  document.documentElement.classList.toggle("body-house-app", activeAppTab === "house");
+  document.body.classList.toggle("body-house-app", activeAppTab === "house");
+
+  appTabButtons.forEach((button) => {
+    const active = button.dataset.appTab === activeAppTab;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  });
+
+  galleryPanel.hidden = activeAppTab !== "gallery";
+  housePanel.hidden = activeAppTab !== "house";
+  galleryPanel.classList.toggle("app-panel-active", activeAppTab === "gallery");
+  housePanel.classList.toggle("app-panel-active", activeAppTab === "house");
+};
+
+const ensureHouseLabMounted = async () => {
+  if (houseLabHandle) {
+    return;
+  }
+
+  if (!houseLabMounting) {
+    housePanel.innerHTML = `<div class="house-loading">Preparing the planner and 3D preview…</div>`;
+    houseLabMounting = import("./house-lab")
+      .then(({ mountHouseLab }) =>
+        mountHouseLab(housePanel, {
+          prefersTouchInput,
+          hasNativeWebGPU,
+        }),
+      )
+      .then((handle) => {
+        if (appDisposed) {
+          handle.dispose();
+          return;
+        }
+
+        houseLabHandle = handle;
+        houseLabHandle.setVisible(activeAppTab === "house");
+      })
+      .catch((error) => {
+        const details = error instanceof Error ? error.message : String(error);
+        housePanel.innerHTML = `<div class="house-error">House Lab failed to load.<br>${details}</div>`;
+        console.error("House Lab failed to mount", error);
+      })
+      .finally(() => {
+        houseLabMounting = null;
+      });
+  }
+
+  await houseLabMounting;
+};
+
+const setActiveAppTab = async (nextTab: AppTab) => {
+  if (activeAppTab === nextTab) {
+    if (nextTab === "house") {
+      await ensureHouseLabMounted();
+      houseLabHandle?.setVisible(true);
+    }
+    return;
+  }
+
+  activeAppTab = nextTab;
+  syncActivePanel();
+
+  if (nextTab === "house") {
+    if (!hasNativeWebGPU) {
+      for (let index = 0; index < mountedExamples.length; index += 1) {
+        unmountExample(index);
+      }
+    }
+
+    await ensureHouseLabMounted();
+    houseLabHandle?.setVisible(true);
+    return;
+  }
+
+  houseLabHandle?.setVisible(false);
+  scrollSuspendUntil = performance.now() + 180;
+
+  for (const mounted of mountedExamples) {
+    if (mounted) {
+      mounted.sizeDirty = true;
+      mounted.fpsSmoothed = 0;
+    }
+  }
+
+  if (!hasNativeWebGPU) {
+    reconcileFallbackExamples();
+  }
+};
+
+appTabButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    const nextTab = button.dataset.appTab === "house" ? "house" : "gallery";
+    void setActiveAppTab(nextTab);
+  });
+});
+
+syncActivePanel();
+
 let renderLoopActive = true;
 let renderFrameHandle = 0;
 let scrollSuspendUntil = 0;
@@ -6510,46 +6676,49 @@ const renderLoop = () => {
   const elapsed = timer.getElapsed();
   const fps = delta > 0 ? THREE.MathUtils.clamp(1 / delta, 0, 240) : 0;
   const scrollSuspended = performance.now() < scrollSuspendUntil;
+  const galleryActive = activeAppTab === "gallery";
 
-  if (!scrollSuspended) {
+  if (galleryActive && !scrollSuspended) {
     reconcileFallbackExamples();
   }
 
-  for (const mounted of mountedExamples) {
-    if (!mounted) {
-      continue;
-    }
-
-    if (mounted.failed) {
-      continue;
-    }
-
-    try {
-      if (scrollSuspended) {
+  if (galleryActive) {
+    for (const mounted of mountedExamples) {
+      if (!mounted) {
         continue;
       }
 
-      mounted.fpsSmoothed = mounted.fpsSmoothed === 0 ? fps : THREE.MathUtils.lerp(mounted.fpsSmoothed, fps, 0.16);
-      mounted.fpsLabel.textContent = `${Math.round(mounted.fpsSmoothed)} FPS`;
-      if (mounted.sizeDirty) {
-        mounted.syncSize();
+      if (mounted.failed) {
+        continue;
       }
-      mounted.cameraRig.update(delta);
-      mounted.wireframeController.update();
-      mounted.update?.(elapsed, delta);
 
-      const rect = mounted.host.getBoundingClientRect();
-      const visible = rect.bottom > 0 && rect.top < window.innerHeight;
+      try {
+        if (scrollSuspended) {
+          continue;
+        }
 
-      if (visible) {
-        mounted.renderer.render(mounted.scene, mounted.camera);
+        mounted.fpsSmoothed = mounted.fpsSmoothed === 0 ? fps : THREE.MathUtils.lerp(mounted.fpsSmoothed, fps, 0.16);
+        mounted.fpsLabel.textContent = `${Math.round(mounted.fpsSmoothed)} FPS`;
+        if (mounted.sizeDirty) {
+          mounted.syncSize();
+        }
+        mounted.cameraRig.update(delta);
+        mounted.wireframeController.update();
+        mounted.update?.(elapsed, delta);
+
+        const rect = mounted.host.getBoundingClientRect();
+        const visible = rect.bottom > 0 && rect.top < window.innerHeight;
+
+        if (visible) {
+          mounted.renderer.render(mounted.scene, mounted.camera);
+        }
+      } catch (error) {
+        mounted.failed = true;
+        mounted.card.dataset.error = "true";
+        const details = error instanceof Error ? error.message : String(error);
+        mounted.host.innerHTML = `<div class="example-error">This example hit a runtime error.<br>${details}</div>`;
+        console.error(`Example "${mounted.card.querySelector("h2")?.textContent ?? "unknown"}" failed`, error);
       }
-    } catch (error) {
-      mounted.failed = true;
-      mounted.card.dataset.error = "true";
-      const details = error instanceof Error ? error.message : String(error);
-      mounted.host.innerHTML = `<div class="example-error">This example hit a runtime error.<br>${details}</div>`;
-      console.error(`Example "${mounted.card.querySelector("h2")?.textContent ?? "unknown"}" failed`, error);
     }
   }
 
@@ -6560,6 +6729,9 @@ renderFrameHandle = requestAnimationFrame(renderLoop);
 
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
+    appDisposed = true;
+    document.documentElement.classList.remove("body-house-app");
+    document.body.classList.remove("body-house-app");
     renderLoopActive = false;
     cancelAnimationFrame(renderFrameHandle);
     window.removeEventListener("scroll", handleWindowScroll);
@@ -6570,6 +6742,8 @@ if (import.meta.hot) {
           disposeMountedExample(mounted);
         }
       }
+
+      houseLabHandle?.dispose();
     };
 
     requestAnimationFrame(() => {
