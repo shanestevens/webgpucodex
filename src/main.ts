@@ -491,6 +491,8 @@ class ExampleCameraRig {
   private lastClientY = 0;
   private orbitDistance = 6;
   private readonly keys = new Set<string>();
+  private readonly touchPoints = new Map<number, THREE.Vector2>();
+  private pinchDistance = 0;
   mode: CameraMode;
 
   constructor(
@@ -507,8 +509,10 @@ class ExampleCameraRig {
     this.syncOrbitDistance();
     this.domElement.addEventListener("contextmenu", this.handleContextMenu);
     this.domElement.addEventListener("pointerdown", this.handlePointerDown);
+    this.domElement.addEventListener("wheel", this.handleWheel, { passive: false });
     window.addEventListener("pointermove", this.handlePointerMove);
     window.addEventListener("pointerup", this.handlePointerUp);
+    window.addEventListener("pointercancel", this.handlePointerUp);
     window.addEventListener("keydown", this.handleKeyDown);
     window.addEventListener("keyup", this.handleKeyUp);
   }
@@ -558,8 +562,10 @@ class ExampleCameraRig {
   dispose(): void {
     this.domElement.removeEventListener("contextmenu", this.handleContextMenu);
     this.domElement.removeEventListener("pointerdown", this.handlePointerDown);
+    this.domElement.removeEventListener("wheel", this.handleWheel);
     window.removeEventListener("pointermove", this.handlePointerMove);
     window.removeEventListener("pointerup", this.handlePointerUp);
+    window.removeEventListener("pointercancel", this.handlePointerUp);
     window.removeEventListener("keydown", this.handleKeyDown);
     window.removeEventListener("keyup", this.handleKeyUp);
   }
@@ -619,12 +625,63 @@ class ExampleCameraRig {
     this.camera.position.add(this.translation);
   }
 
+  private moveAlongView(amount: number): void {
+    this.camera.getWorldDirection(this.forward).normalize();
+    this.camera.position.addScaledVector(this.forward, amount);
+  }
+
+  private applyTouchZoom(distanceDelta: number): void {
+    if (Math.abs(distanceDelta) < 0.5) {
+      return;
+    }
+
+    const zoomAmount = distanceDelta * 0.01;
+
+    if (this.mode === "orbit") {
+      const offset = this.camera.position.clone().sub(this.controls.target);
+      const distance = offset.length();
+      const nextDistance = THREE.MathUtils.clamp(distance - zoomAmount, this.controls.minDistance, this.controls.maxDistance);
+
+      if (Math.abs(nextDistance - distance) < 0.0001) {
+        return;
+      }
+
+      offset.setLength(nextDistance);
+      this.camera.position.copy(this.controls.target).add(offset);
+      this.controls.update();
+      this.syncOrbitDistance();
+      return;
+    }
+
+    this.moveAlongView(zoomAmount * this.viewState.moveSpeed * 0.35);
+  }
+
+  private getTouchDistance(): number {
+    const points = [...this.touchPoints.values()];
+
+    if (points.length < 2) {
+      return 0;
+    }
+
+    return points[0].distanceTo(points[1]);
+  }
+
   private handleContextMenu = (event: MouseEvent): void => {
     event.preventDefault();
   };
 
   private handlePointerDown = (event: PointerEvent): void => {
     this.domElement.focus();
+
+    if (event.pointerType === "touch") {
+      this.touchPoints.set(event.pointerId, new THREE.Vector2(event.clientX, event.clientY));
+
+      if (this.touchPoints.size >= 2) {
+        this.pinchDistance = this.getTouchDistance();
+      }
+
+      return;
+    }
 
     if (this.mode !== "fps") {
       return;
@@ -644,6 +701,22 @@ class ExampleCameraRig {
   };
 
   private handlePointerMove = (event: PointerEvent): void => {
+    if (event.pointerType === "touch" && this.touchPoints.has(event.pointerId)) {
+      this.touchPoints.get(event.pointerId)?.set(event.clientX, event.clientY);
+
+      if (this.touchPoints.size >= 2) {
+        const nextDistance = this.getTouchDistance();
+
+        if (this.pinchDistance > 0) {
+          this.applyTouchZoom(nextDistance - this.pinchDistance);
+        }
+
+        this.pinchDistance = nextDistance;
+      }
+
+      return;
+    }
+
     if (this.mode !== "fps" || this.pointerId !== event.pointerId) {
       return;
     }
@@ -662,6 +735,12 @@ class ExampleCameraRig {
   };
 
   private handlePointerUp = (event: PointerEvent): void => {
+    if (event.pointerType === "touch") {
+      this.touchPoints.delete(event.pointerId);
+      this.pinchDistance = this.touchPoints.size >= 2 ? this.getTouchDistance() : 0;
+      return;
+    }
+
     if (this.pointerId !== event.pointerId) {
       return;
     }
@@ -672,6 +751,15 @@ class ExampleCameraRig {
 
     this.pointerId = null;
     this.pointerButton = -1;
+  };
+
+  private handleWheel = (event: WheelEvent): void => {
+    if (this.mode !== "fps") {
+      return;
+    }
+
+    event.preventDefault();
+    this.moveAlongView(-event.deltaY * 0.0025 * this.viewState.moveSpeed);
   };
 
   private handleKeyDown = (event: KeyboardEvent): void => {
@@ -1802,27 +1890,34 @@ const examples: ExampleDefinition[] = [
       stageTop.position.y = -0.02;
       stageTop.receiveShadow = true;
 
+      const shadowFocus = new THREE.Object3D();
+      shadowFocus.position.set(0.2, 0.34, -1.2);
+
       const key = new THREE.DirectionalLight("#fff7ec", studioState.keyIntensity);
-      key.position.set(5.8, 8.4, 4.6);
+      key.position.set(6.8, 9.2, -6.2);
+      key.target = shadowFocus;
       key.castShadow = true;
-      key.shadow.mapSize.set(1024, 1024);
-      key.shadow.camera.left = -9;
-      key.shadow.camera.right = 9;
-      key.shadow.camera.top = 9;
-      key.shadow.camera.bottom = -9;
-      key.shadow.normalBias = 0.18;
+      key.shadow.mapSize.set(2048, 2048);
+      key.shadow.camera.left = -10;
+      key.shadow.camera.right = 10;
+      key.shadow.camera.top = 10;
+      key.shadow.camera.bottom = -10;
+      key.shadow.bias = -0.00012;
+      key.shadow.normalBias = 0.1;
 
       const shadowSpot = new THREE.SpotLight("#fff4dc", studioState.keyIntensity * 7.5, 28, Math.PI / 5, 0.34, 1.1);
-      shadowSpot.position.set(0.8, 9.8, 4.2);
-      shadowSpot.target = stageTop;
+      shadowSpot.position.set(-5.4, 7.8, -3.8);
+      shadowSpot.target = shadowFocus;
       shadowSpot.castShadow = true;
       shadowSpot.shadow.mapSize.set(2048, 2048);
-      shadowSpot.shadow.bias = -0.00015;
-      shadowSpot.shadow.normalBias = 0.12;
+      shadowSpot.shadow.bias = -0.00018;
+      shadowSpot.shadow.normalBias = 0.08;
+      shadowSpot.shadow.camera.near = 1;
+      shadowSpot.shadow.camera.far = 26;
 
       const fill = new THREE.HemisphereLight("#c1d9ff", "#66758f", studioState.fillIntensity);
       const rim = new THREE.DirectionalLight("#c7d7ff", studioState.rimIntensity);
-      rim.position.set(-6.2, 5.3, -3.8);
+      rim.position.set(-4.4, 5.6, 6.2);
 
       const accentRig = new THREE.Group();
       const accent = new THREE.PointLight("#ffd9b7", studioState.accentIntensity, 18, 2);
@@ -1834,7 +1929,7 @@ const examples: ExampleDefinition[] = [
       accent.add(accentMarker);
       accentRig.add(accent);
 
-      scene.add(stage, stageTop, key, shadowSpot, fill, rim, accentRig);
+      scene.add(stage, stageTop, shadowFocus, key, shadowSpot, fill, rim, accentRig);
 
       const sphereGeometry = new THREE.SphereGeometry(0.56, 48, 32);
       const capsuleGeometry = new THREE.CapsuleGeometry(0.34, 1.24, 6, 18);
@@ -2072,8 +2167,10 @@ const examples: ExampleDefinition[] = [
 
           accentRig.rotation.y = elapsed * 0.2;
           accent.position.y = 3.7 + Math.sin(elapsed * 1.1) * 0.6;
-          key.position.x = Math.cos(elapsed * 0.18) * 6.4;
-          key.position.z = Math.sin(elapsed * 0.18) * 5.2;
+          key.position.x = Math.cos(elapsed * 0.18) * 7.4;
+          key.position.z = -5.6 + Math.sin(elapsed * 0.18) * 2.4;
+          shadowSpot.position.x = -5.4 + Math.cos(elapsed * 0.24) * 1.4;
+          shadowSpot.position.z = -3.8 + Math.sin(elapsed * 0.24) * 1.2;
         },
         setupGui: ({ gui }) => {
           const lookdevFolder = gui.addFolder("PBR lab");
@@ -2122,6 +2219,7 @@ const examples: ExampleDefinition[] = [
           stage.geometry.dispose();
           stageTop.geometry.dispose();
           accentMarker.geometry.dispose();
+          disposeSceneResources([shadowFocus]);
 
           for (const material of trackedMaterials) {
             material.dispose();
@@ -6264,6 +6362,13 @@ const mountedExamples = await Promise.all(
 
 let renderLoopActive = true;
 let renderFrameHandle = 0;
+let scrollSuspendUntil = 0;
+
+const handleWindowScroll = () => {
+  scrollSuspendUntil = performance.now() + 140;
+};
+
+window.addEventListener("scroll", handleWindowScroll, { passive: true });
 
 const renderLoop = () => {
   if (!renderLoopActive) {
@@ -6274,6 +6379,7 @@ const renderLoop = () => {
   const delta = timer.getDelta();
   const elapsed = timer.getElapsed();
   const fps = delta > 0 ? THREE.MathUtils.clamp(1 / delta, 0, 240) : 0;
+  const scrollSuspended = performance.now() < scrollSuspendUntil;
 
   for (const mounted of mountedExamples) {
     if (mounted.failed) {
@@ -6281,6 +6387,10 @@ const renderLoop = () => {
     }
 
     try {
+      if (scrollSuspended) {
+        continue;
+      }
+
       mounted.fpsSmoothed = mounted.fpsSmoothed === 0 ? fps : THREE.MathUtils.lerp(mounted.fpsSmoothed, fps, 0.16);
       mounted.fpsLabel.textContent = `${Math.round(mounted.fpsSmoothed)} FPS`;
       if (mounted.sizeDirty) {
@@ -6314,6 +6424,7 @@ if (import.meta.hot) {
   import.meta.hot.dispose(() => {
     renderLoopActive = false;
     cancelAnimationFrame(renderFrameHandle);
+    window.removeEventListener("scroll", handleWindowScroll);
 
     const teardownExamples = () => {
       for (const mounted of mountedExamples) {
@@ -6373,7 +6484,7 @@ async function mountExample(card: HTMLElement, example: ExampleDefinition): Prom
   controls.zoomToCursor = true;
   controls.touches = {
     ONE: THREE.TOUCH.ROTATE,
-    TWO: THREE.TOUCH.DOLLY_PAN,
+    TWO: THREE.TOUCH.PAN,
   };
   controls.mouseButtons = {
     LEFT: THREE.MOUSE.ROTATE,
