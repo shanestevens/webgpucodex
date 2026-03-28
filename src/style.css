@@ -208,6 +208,8 @@ a {
   min-height: 250px;
   border-radius: 18px;
   overflow: hidden;
+  touch-action: none;
+  overscroll-behavior: contain;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background:
     radial-gradient(circle at top, rgba(113, 212, 255, 0.16), transparent 48%),
@@ -218,6 +220,7 @@ a {
   display: block;
   width: 100%;
   height: 100%;
+  touch-action: none;
 }
 
 .example-fps {
