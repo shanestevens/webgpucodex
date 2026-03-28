@@ -220,6 +220,54 @@ a {
   height: 100%;
 }
 
+.example-fps {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  padding: 5px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(6, 13, 22, 0.68);
+  color: #dfeeff;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  backdrop-filter: blur(8px);
+  pointer-events: none;
+}
+
+.example-gui-shell {
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, rgba(10, 17, 27, 0.92), rgba(8, 13, 21, 0.96));
+  overflow: hidden;
+}
+
+.example-gui {
+  min-height: 148px;
+}
+
+.example-gui .lil-gui {
+  --background-color: rgba(8, 13, 21, 0.96);
+  --widget-color: rgba(20, 35, 51, 0.92);
+  --hover-color: rgba(33, 56, 78, 0.96);
+  --focus-color: rgba(113, 212, 255, 0.22);
+  --text-color: #dbe9ff;
+  --title-background-color: rgba(255, 177, 95, 0.12);
+  --title-text-color: #ffd5aa;
+  --number-color: #77d8ff;
+  --string-color: #ffb15f;
+  width: 100%;
+  max-width: 100%;
+  border: 0;
+}
+
+.example-gui .lil-gui.root {
+  max-height: 360px;
+  overflow-y: auto;
+}
+
 .example-card[data-error="true"] {
   border-color: rgba(255, 132, 132, 0.35);
 }

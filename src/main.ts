@@ -3,12 +3,37 @@ import "./style.css";
 import * as THREE from "three/webgpu";
 import WebGPU from "three/addons/capabilities/WebGPU.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+import GUI from "three/addons/libs/lil-gui.module.min.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { SimplexNoise } from "three/addons/math/SimplexNoise.js";
 import { Fn, color, cos, instanceIndex, instancedArray, localId, mix, normalLocal, positionLocal, sin, textureStore, time, uvec2, uv, vec3, vec4, workgroupId } from "three/tsl";
+
+type CameraMode = "orbit" | "fps";
+
+type ExampleViewState = {
+  wireframe: boolean;
+  cameraMode: CameraMode;
+  moveSpeed: number;
+  lookSpeed: number;
+};
+
+type ExampleGuiContext = {
+  gui: GUI;
+  scene: THREE.Scene;
+  camera: THREE.PerspectiveCamera;
+  renderer: THREE.WebGPURenderer;
+  controls: OrbitControls;
+  cameraRig: ExampleCameraRig;
+  viewState: ExampleViewState;
+  setWireframe: (enabled: boolean) => void;
+};
 
 type ExampleRuntime = {
   update?: (elapsed: number, delta: number) => void;
   dispose?: () => void;
+  setupGui?: (context: ExampleGuiContext) => void;
+  setWireframe?: (enabled: boolean) => void;
 };
 
 type ExampleContext = {
@@ -37,6 +62,10 @@ type MountedExample = ExampleRuntime & {
   renderer: THREE.WebGPURenderer;
   controls: OrbitControls;
   resizeObserver: ResizeObserver;
+  cameraRig: ExampleCameraRig;
+  gui: GUI;
+  fpsLabel: HTMLDivElement;
+  fpsSmoothed: number;
   failed: boolean;
 };
 
@@ -94,13 +123,77 @@ function createUvReferenceTexture(): THREE.CanvasTexture {
   return texture;
 }
 
-function createOrbitLine(radius: number, colorValue: string): THREE.LineLoop {
+function createLookdevFloorTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement("canvas");
+  canvas.width = 512;
+  canvas.height = 512;
+
+  const context = canvas.getContext("2d");
+
+  if (!context) {
+    throw new Error("Could not create 2D canvas context");
+  }
+
+  context.fillStyle = "#616a7a";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+
+  const majorStep = 64;
+  const minorStep = 16;
+
+  for (let y = 0; y < canvas.height; y += majorStep) {
+    for (let x = 0; x < canvas.width; x += majorStep) {
+      const parity = (x / majorStep + y / majorStep) % 2;
+      context.fillStyle = parity === 0 ? "#5d6676" : "#505969";
+      context.fillRect(x, y, majorStep, majorStep);
+    }
+  }
+
+  context.globalAlpha = 0.18;
+  for (let y = 0; y < canvas.height; y += minorStep) {
+    for (let x = 0; x < canvas.width; x += minorStep) {
+      const parity = (x / minorStep + y / minorStep) % 2;
+      context.fillStyle = parity === 0 ? "#818b9a" : "#465061";
+      context.fillRect(x, y, minorStep, minorStep);
+    }
+  }
+
+  context.globalAlpha = 0.1;
+  context.strokeStyle = "#c7cfda";
+  context.lineWidth = 2;
+
+  for (let x = 0; x <= canvas.width; x += majorStep) {
+    context.beginPath();
+    context.moveTo(x, 0);
+    context.lineTo(x, canvas.height);
+    context.stroke();
+  }
+
+  for (let y = 0; y <= canvas.height; y += majorStep) {
+    context.beginPath();
+    context.moveTo(0, y);
+    context.lineTo(canvas.width, y);
+    context.stroke();
+  }
+
+  context.globalAlpha = 1;
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.anisotropy = 8;
+  return texture;
+}
+
+function createOrbitLine(radius: number, colorValue: string): THREE.Line {
   const points: THREE.Vector3[] = [];
 
   for (let index = 0; index < 96; index += 1) {
     const angle = index / 96 * Math.PI * 2;
     points.push(new THREE.Vector3(Math.cos(angle) * radius, 0, Math.sin(angle) * radius));
   }
+
+  points.push(points[0].clone());
 
   const geometry = new THREE.BufferGeometry().setFromPoints(points);
   const material = new THREE.LineBasicMaterial({
@@ -109,7 +202,736 @@ function createOrbitLine(radius: number, colorValue: string): THREE.LineLoop {
     opacity: 0.45,
   });
 
-  return new THREE.LineLoop(geometry, material);
+  return new THREE.Line(geometry, material);
+}
+
+function isWireframeCapable(material: THREE.Material): material is THREE.Material & { wireframe: boolean } {
+  return "wireframe" in material;
+}
+
+function setSceneWireframe(root: THREE.Object3D, enabled: boolean): void {
+  root.traverse((object) => {
+    if ((object.userData as { skipGlobalWireframe?: boolean }).skipGlobalWireframe) {
+      return;
+    }
+
+    if (!("material" in object)) {
+      return;
+    }
+
+    const material = object.material;
+
+    if (Array.isArray(material)) {
+      for (const item of material) {
+        if (isWireframeCapable(item)) {
+          item.wireframe = enabled;
+        }
+      }
+
+      return;
+    }
+
+    if (material instanceof THREE.Material && isWireframeCapable(material)) {
+      material.wireframe = enabled;
+    }
+  });
+}
+
+type SkinnedWireframeOverlay = {
+  update: () => void;
+  setVisible: (visible: boolean) => void;
+  dispose: () => void;
+};
+
+type MeshWireframeOverlay = {
+  setVisible: (visible: boolean) => void;
+  dispose: () => void;
+};
+
+function createMeshWireframeOverlay(sourceMesh: THREE.Mesh): MeshWireframeOverlay | null {
+  if (!(sourceMesh.geometry instanceof THREE.BufferGeometry)) {
+    return null;
+  }
+
+  const overlay = new THREE.LineSegments(
+    new THREE.WireframeGeometry(sourceMesh.geometry),
+    new THREE.LineBasicMaterial({
+      color: "#e4f6ff",
+      transparent: true,
+      opacity: 0.8,
+      depthWrite: false,
+      toneMapped: false,
+    }),
+  );
+  overlay.visible = false;
+  overlay.frustumCulled = false;
+  overlay.renderOrder = 2;
+  overlay.userData.skipGlobalWireframe = true;
+  sourceMesh.add(overlay);
+
+  return {
+    setVisible: (visible: boolean) => {
+      overlay.visible = visible;
+    },
+    dispose: () => {
+      sourceMesh.remove(overlay);
+      overlay.geometry.dispose();
+      (overlay.material as THREE.Material).dispose();
+    },
+  };
+}
+
+function createSkinnedWireframeOverlay(sourceMesh: THREE.SkinnedMesh): SkinnedWireframeOverlay | null {
+  const sourceGeometry = sourceMesh.geometry;
+  const sourcePosition = sourceGeometry.getAttribute("position");
+
+  if (!(sourcePosition instanceof THREE.BufferAttribute)) {
+    return null;
+  }
+
+  const edgeVertexIndices: number[] = [];
+  const seenEdges = new Set<string>();
+  const addEdge = (a: number, b: number) => {
+    if (a === b) {
+      return;
+    }
+
+    const min = Math.min(a, b);
+    const max = Math.max(a, b);
+    const key = `${min}:${max}`;
+
+    if (seenEdges.has(key)) {
+      return;
+    }
+
+    seenEdges.add(key);
+    edgeVertexIndices.push(a, b);
+  };
+
+  if (sourceGeometry.index) {
+    const indexArray = sourceGeometry.index.array;
+
+    for (let index = 0; index < sourceGeometry.index.count; index += 3) {
+      const a = Number(indexArray[index]);
+      const b = Number(indexArray[index + 1]);
+      const c = Number(indexArray[index + 2]);
+      addEdge(a, b);
+      addEdge(b, c);
+      addEdge(c, a);
+    }
+  } else {
+    for (let index = 0; index < sourcePosition.count; index += 3) {
+      addEdge(index, index + 1);
+      addEdge(index + 1, index + 2);
+      addEdge(index + 2, index);
+    }
+  }
+
+  if (edgeVertexIndices.length === 0) {
+    return null;
+  }
+
+  const linePositions = new Float32Array(edgeVertexIndices.length * 3);
+  const linePositionAttribute = new THREE.BufferAttribute(linePositions, 3);
+  const lineGeometry = new THREE.BufferGeometry();
+  lineGeometry.setAttribute("position", linePositionAttribute);
+
+  const lineMaterial = new THREE.LineBasicMaterial({
+    color: "#e6f7ff",
+    transparent: true,
+    opacity: 0.78,
+    depthWrite: false,
+    toneMapped: false,
+  });
+
+  const lines = new THREE.LineSegments(lineGeometry, lineMaterial);
+  lines.visible = false;
+  lines.frustumCulled = false;
+  lines.renderOrder = 3;
+  sourceMesh.add(lines);
+
+  const workingVertex = new THREE.Vector3();
+  const skinnedMesh = sourceMesh as THREE.SkinnedMesh & {
+    applyBoneTransform: (index: number, vector: THREE.Vector3) => THREE.Vector3;
+  };
+
+  return {
+    update: () => {
+      if (!lines.visible) {
+        return;
+      }
+
+      for (let index = 0; index < edgeVertexIndices.length; index += 1) {
+        const vertexIndex = edgeVertexIndices[index];
+        workingVertex.fromBufferAttribute(sourcePosition, vertexIndex);
+        skinnedMesh.applyBoneTransform(vertexIndex, workingVertex);
+        const offset = index * 3;
+        linePositions[offset] = workingVertex.x;
+        linePositions[offset + 1] = workingVertex.y;
+        linePositions[offset + 2] = workingVertex.z;
+      }
+
+      linePositionAttribute.needsUpdate = true;
+    },
+    setVisible: (visible: boolean) => {
+      lines.visible = visible;
+    },
+    dispose: () => {
+      sourceMesh.remove(lines);
+      lineGeometry.dispose();
+      lineMaterial.dispose();
+    },
+  };
+}
+
+class ExampleCameraRig {
+  private readonly forward = new THREE.Vector3();
+  private readonly right = new THREE.Vector3();
+  private readonly up = new THREE.Vector3();
+  private readonly euler = new THREE.Euler(0, 0, 0, "YXZ");
+  private readonly translation = new THREE.Vector3();
+  private readonly orbitTarget = new THREE.Vector3();
+  private readonly viewState: ExampleViewState;
+  private pointerId: number | null = null;
+  private pointerButton = -1;
+  private lastClientX = 0;
+  private lastClientY = 0;
+  private orbitDistance = 6;
+  private readonly keys = new Set<string>();
+  mode: CameraMode;
+
+  constructor(
+    private readonly camera: THREE.PerspectiveCamera,
+    private readonly controls: OrbitControls,
+    private readonly domElement: HTMLCanvasElement,
+    viewState: ExampleViewState,
+  ) {
+    this.viewState = viewState;
+    this.mode = viewState.cameraMode;
+
+    this.domElement.tabIndex = 0;
+    this.domElement.style.outline = "none";
+    this.syncOrbitDistance();
+    this.domElement.addEventListener("contextmenu", this.handleContextMenu);
+    this.domElement.addEventListener("pointerdown", this.handlePointerDown);
+    window.addEventListener("pointermove", this.handlePointerMove);
+    window.addEventListener("pointerup", this.handlePointerUp);
+    window.addEventListener("keydown", this.handleKeyDown);
+    window.addEventListener("keyup", this.handleKeyUp);
+  }
+
+  setMode(mode: CameraMode): void {
+    if (mode === this.mode) {
+      this.viewState.cameraMode = mode;
+      return;
+    }
+
+    this.keys.clear();
+    this.pointerButton = -1;
+
+    if (this.pointerId !== null && this.domElement.hasPointerCapture(this.pointerId)) {
+      this.domElement.releasePointerCapture(this.pointerId);
+    }
+
+    this.pointerId = null;
+
+    if (mode === "fps") {
+      this.syncOrbitDistance();
+      this.controls.enabled = false;
+    } else {
+      this.camera.getWorldDirection(this.orbitTarget);
+      this.controls.target.copy(this.camera.position).addScaledVector(this.orbitTarget, this.orbitDistance);
+      this.controls.enabled = true;
+      this.controls.update();
+      this.syncOrbitDistance();
+    }
+
+    this.mode = mode;
+    this.viewState.cameraMode = mode;
+  }
+
+  update(delta: number): void {
+    if (this.mode === "orbit") {
+      this.controls.enabled = true;
+      this.controls.update();
+      this.syncOrbitDistance();
+      return;
+    }
+
+    this.controls.enabled = false;
+    this.applyKeyboardMotion(delta);
+  }
+
+  dispose(): void {
+    this.domElement.removeEventListener("contextmenu", this.handleContextMenu);
+    this.domElement.removeEventListener("pointerdown", this.handlePointerDown);
+    window.removeEventListener("pointermove", this.handlePointerMove);
+    window.removeEventListener("pointerup", this.handlePointerUp);
+    window.removeEventListener("keydown", this.handleKeyDown);
+    window.removeEventListener("keyup", this.handleKeyUp);
+  }
+
+  private syncOrbitDistance(): void {
+    this.orbitDistance = Math.max(this.camera.position.distanceTo(this.controls.target), 0.75);
+  }
+
+  private applyKeyboardMotion(delta: number): void {
+    this.camera.getWorldDirection(this.forward).normalize();
+    this.right.crossVectors(this.forward, this.camera.up).normalize();
+    this.up.set(0, 1, 0).applyQuaternion(this.camera.quaternion).normalize();
+    this.translation.set(0, 0, 0);
+
+    if (this.keys.has("KeyW")) {
+      this.translation.add(this.forward);
+    }
+    if (this.keys.has("KeyS")) {
+      this.translation.addScaledVector(this.forward, -1);
+    }
+    if (this.keys.has("KeyD")) {
+      this.translation.add(this.right);
+    }
+    if (this.keys.has("KeyA")) {
+      this.translation.addScaledVector(this.right, -1);
+    }
+    if (this.keys.has("KeyE")) {
+      this.translation.add(this.up);
+    }
+    if (this.keys.has("KeyQ")) {
+      this.translation.addScaledVector(this.up, -1);
+    }
+
+    if (this.translation.lengthSq() === 0) {
+      return;
+    }
+
+    this.translation.normalize().multiplyScalar(this.viewState.moveSpeed * delta);
+    this.camera.position.add(this.translation);
+  }
+
+  private rotateCamera(deltaX: number, deltaY: number): void {
+    this.euler.setFromQuaternion(this.camera.quaternion);
+    this.euler.y -= deltaX * 0.0024 * this.viewState.lookSpeed;
+    this.euler.x -= deltaY * 0.0024 * this.viewState.lookSpeed;
+    this.euler.x = THREE.MathUtils.clamp(this.euler.x, -Math.PI / 2 + 0.01, Math.PI / 2 - 0.01);
+    this.camera.quaternion.setFromEuler(this.euler);
+  }
+
+  private panCamera(deltaX: number, deltaY: number): void {
+    const panScale = 0.0105 * this.viewState.moveSpeed;
+    this.camera.getWorldDirection(this.forward).normalize();
+    this.right.crossVectors(this.forward, this.camera.up).normalize();
+    this.up.set(0, 1, 0).applyQuaternion(this.camera.quaternion).normalize();
+    this.translation.copy(this.right).multiplyScalar(-deltaX * panScale);
+    this.translation.addScaledVector(this.up, deltaY * panScale);
+    this.camera.position.add(this.translation);
+  }
+
+  private handleContextMenu = (event: MouseEvent): void => {
+    event.preventDefault();
+  };
+
+  private handlePointerDown = (event: PointerEvent): void => {
+    this.domElement.focus();
+
+    if (this.mode !== "fps") {
+      return;
+    }
+
+    if (event.button !== 0 && event.button !== 2) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    this.pointerId = event.pointerId;
+    this.pointerButton = event.button;
+    this.lastClientX = event.clientX;
+    this.lastClientY = event.clientY;
+    this.domElement.setPointerCapture(event.pointerId);
+  };
+
+  private handlePointerMove = (event: PointerEvent): void => {
+    if (this.mode !== "fps" || this.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const deltaX = event.clientX - this.lastClientX;
+    const deltaY = event.clientY - this.lastClientY;
+    this.lastClientX = event.clientX;
+    this.lastClientY = event.clientY;
+
+    if (this.pointerButton === 2) {
+      this.panCamera(deltaX, deltaY);
+      return;
+    }
+
+    this.rotateCamera(deltaX, deltaY);
+  };
+
+  private handlePointerUp = (event: PointerEvent): void => {
+    if (this.pointerId !== event.pointerId) {
+      return;
+    }
+
+    if (this.domElement.hasPointerCapture(event.pointerId)) {
+      this.domElement.releasePointerCapture(event.pointerId);
+    }
+
+    this.pointerId = null;
+    this.pointerButton = -1;
+  };
+
+  private handleKeyDown = (event: KeyboardEvent): void => {
+    if (this.mode !== "fps" || document.activeElement !== this.domElement) {
+      return;
+    }
+
+    if (!/^Key[WASDQE]$/.test(event.code)) {
+      return;
+    }
+
+    event.preventDefault();
+    this.keys.add(event.code);
+  };
+
+  private handleKeyUp = (event: KeyboardEvent): void => {
+    if (!/^Key[WASDQE]$/.test(event.code)) {
+      return;
+    }
+
+    this.keys.delete(event.code);
+  };
+}
+
+type TerrainEdgeMask = {
+  north: boolean;
+  south: boolean;
+  east: boolean;
+  west: boolean;
+};
+
+type TerrainLeaf = {
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+  level: number;
+  seams: TerrainEdgeMask;
+};
+
+type TerrainSettings = {
+  size: number;
+  segments: number;
+  maxLevel: number;
+  splitDistance: number;
+  skirtDepth: number;
+};
+
+function sampleTerrainHeight(simplex: SimplexNoise, x: number, z: number): number {
+  const broad = simplex.noise(x * 0.075, z * 0.075) * 2.6;
+  const ridged = Math.abs(simplex.noise(x * 0.16 + 31, z * 0.16 - 19)) * 1.4;
+  const medium = simplex.noise(x * 0.34 - 11, z * 0.34 + 17) * 0.65;
+  const fine = simplex.noise(x * 0.9 + 7, z * 0.9 + 3) * 0.09;
+  const radial = Math.max(0, 1 - Math.hypot(x, z) / 22) * 0.9;
+  return broad - ridged + medium + fine + radial - 0.45;
+}
+
+function paintTerrainColor(height: number, colorTarget: THREE.Color): void {
+  if (height < -0.18) {
+    colorTarget.set("#1e547c");
+    return;
+  }
+
+  if (height < 0.22) {
+    colorTarget.set("#67945d");
+    return;
+  }
+
+  if (height < 1.05) {
+    colorTarget.set("#7ba56a");
+    return;
+  }
+
+  if (height < 2.15) {
+    colorTarget.set("#8c8168");
+    return;
+  }
+
+  colorTarget.set("#d8dde5");
+}
+
+function sampleTerrainNormal(
+  simplex: SimplexNoise,
+  x: number,
+  z: number,
+  target: THREE.Vector3,
+  sampleStep = 0.18,
+): THREE.Vector3 {
+  const left = sampleTerrainHeight(simplex, x - sampleStep, z);
+  const right = sampleTerrainHeight(simplex, x + sampleStep, z);
+  const back = sampleTerrainHeight(simplex, x, z - sampleStep);
+  const front = sampleTerrainHeight(simplex, x, z + sampleStep);
+  return target.set(left - right, sampleStep * 2, back - front).normalize();
+}
+
+function createTerrainLeaf(
+  minX: number,
+  maxX: number,
+  minZ: number,
+  maxZ: number,
+  level: number,
+): TerrainLeaf {
+  return {
+    minX,
+    maxX,
+    minZ,
+    maxZ,
+    level,
+    seams: { north: false, south: false, east: false, west: false },
+  };
+}
+
+function splitTerrainLeaf(leaf: TerrainLeaf): TerrainLeaf[] {
+  const midX = (leaf.minX + leaf.maxX) * 0.5;
+  const midZ = (leaf.minZ + leaf.maxZ) * 0.5;
+  const nextLevel = leaf.level + 1;
+
+  return [
+    createTerrainLeaf(leaf.minX, midX, leaf.minZ, midZ, nextLevel),
+    createTerrainLeaf(midX, leaf.maxX, leaf.minZ, midZ, nextLevel),
+    createTerrainLeaf(leaf.minX, midX, midZ, leaf.maxZ, nextLevel),
+    createTerrainLeaf(midX, leaf.maxX, midZ, leaf.maxZ, nextLevel),
+  ];
+}
+
+function buildTerrainLeaves(camera: THREE.Vector3, settings: TerrainSettings): TerrainLeaf[] {
+  const root = createTerrainLeaf(
+    -settings.size * 0.5,
+    settings.size * 0.5,
+    -settings.size * 0.5,
+    settings.size * 0.5,
+    0,
+  );
+  const leaves: TerrainLeaf[] = [];
+
+  const traverse = (leaf: TerrainLeaf) => {
+    const halfWidth = (leaf.maxX - leaf.minX) * 0.5;
+    const halfDepth = (leaf.maxZ - leaf.minZ) * 0.5;
+    const centerX = leaf.minX + halfWidth;
+    const centerZ = leaf.minZ + halfDepth;
+    const edgeDistance = Math.hypot(
+      Math.max(Math.abs(camera.x - centerX) - halfWidth, 0),
+      Math.max(Math.abs(camera.z - centerZ) - halfDepth, 0),
+    );
+    const shouldSplit = leaf.level < settings.maxLevel && edgeDistance < (leaf.maxX - leaf.minX) * settings.splitDistance;
+
+    if (!shouldSplit) {
+      leaves.push(leaf);
+      return;
+    }
+
+    for (const child of splitTerrainLeaf(leaf)) {
+      traverse(child);
+    }
+  };
+
+  traverse(root);
+  return balanceTerrainLeaves(leaves);
+}
+
+function balanceTerrainLeaves(initialLeaves: TerrainLeaf[]): TerrainLeaf[] {
+  let leaves = [...initialLeaves];
+  let changed = true;
+  let guard = 0;
+
+  while (changed && guard < 8) {
+    changed = false;
+    guard += 1;
+    const nextLeaves: TerrainLeaf[] = [];
+
+    for (const leaf of leaves) {
+      const neighborLevels = getTerrainNeighborLevels(leaf, leaves);
+      const maxNeighborLevel = Math.max(
+        ...neighborLevels.north,
+        ...neighborLevels.south,
+        ...neighborLevels.east,
+        ...neighborLevels.west,
+      );
+
+      if (maxNeighborLevel > leaf.level + 1) {
+        nextLeaves.push(...splitTerrainLeaf(leaf));
+        changed = true;
+      } else {
+        nextLeaves.push(leaf);
+      }
+    }
+
+    leaves = nextLeaves;
+  }
+
+  for (const leaf of leaves) {
+    const neighborLevels = getTerrainNeighborLevels(leaf, leaves);
+    leaf.seams = {
+      north: neighborLevels.north.some((level) => level < leaf.level),
+      south: neighborLevels.south.some((level) => level < leaf.level),
+      east: neighborLevels.east.some((level) => level < leaf.level),
+      west: neighborLevels.west.some((level) => level < leaf.level),
+    };
+  }
+
+  return leaves;
+}
+
+function getTerrainNeighborLevels(
+  leaf: TerrainLeaf,
+  leaves: TerrainLeaf[],
+): Record<keyof TerrainEdgeMask, number[]> {
+  const epsilon = 0.0001;
+  const sampleRange = [0.2, 0.5, 0.8];
+  const levels = {
+    north: [] as number[],
+    south: [] as number[],
+    east: [] as number[],
+    west: [] as number[],
+  };
+
+  for (const t of sampleRange) {
+    levels.north.push(findTerrainLeafLevel(leaves, THREE.MathUtils.lerp(leaf.minX, leaf.maxX, t), leaf.maxZ + epsilon));
+    levels.south.push(findTerrainLeafLevel(leaves, THREE.MathUtils.lerp(leaf.minX, leaf.maxX, t), leaf.minZ - epsilon));
+    levels.east.push(findTerrainLeafLevel(leaves, leaf.maxX + epsilon, THREE.MathUtils.lerp(leaf.minZ, leaf.maxZ, t)));
+    levels.west.push(findTerrainLeafLevel(leaves, leaf.minX - epsilon, THREE.MathUtils.lerp(leaf.minZ, leaf.maxZ, t)));
+  }
+
+  return levels;
+}
+
+function findTerrainLeafLevel(leaves: TerrainLeaf[], x: number, z: number): number {
+  for (const leaf of leaves) {
+    if (x >= leaf.minX && x <= leaf.maxX && z >= leaf.minZ && z <= leaf.maxZ) {
+      return leaf.level;
+    }
+  }
+
+  return -1;
+}
+
+function createTerrainPatchGeometry(
+  simplex: SimplexNoise,
+  leaf: TerrainLeaf,
+  settings: TerrainSettings,
+): THREE.BufferGeometry {
+  const positions: number[] = [];
+  const colors: number[] = [];
+  const normals: number[] = [];
+  const indices: number[] = [];
+  const surfaceColor = new THREE.Color();
+  const surfaceNormal = new THREE.Vector3();
+  const segments = settings.segments;
+  const gridWidth = segments + 1;
+
+  const indexAt = (ix: number, iz: number) => iz * gridWidth + ix;
+
+  for (let iz = 0; iz <= segments; iz += 1) {
+    const v = iz / segments;
+    const z = THREE.MathUtils.lerp(leaf.minZ, leaf.maxZ, v);
+
+    for (let ix = 0; ix <= segments; ix += 1) {
+      const u = ix / segments;
+      const x = THREE.MathUtils.lerp(leaf.minX, leaf.maxX, u);
+      const y = sampleTerrainHeight(simplex, x, z);
+      positions.push(x, y, z);
+      paintTerrainColor(y, surfaceColor);
+      colors.push(surfaceColor.r, surfaceColor.g, surfaceColor.b);
+      sampleTerrainNormal(simplex, x, z, surfaceNormal);
+      normals.push(surfaceNormal.x, surfaceNormal.y, surfaceNormal.z);
+    }
+  }
+
+  for (let iz = 0; iz < segments; iz += 1) {
+    for (let ix = 0; ix < segments; ix += 1) {
+      const a = indexAt(ix, iz);
+      const b = indexAt(ix + 1, iz);
+      const c = indexAt(ix, iz + 1);
+      const d = indexAt(ix + 1, iz + 1);
+      indices.push(a, c, b, b, c, d);
+    }
+  }
+
+  const addSkirt = (edge: keyof TerrainEdgeMask) => {
+    const topIndices: number[] = [];
+
+    if (edge === "south") {
+      for (let ix = 0; ix <= segments; ix += 1) {
+        topIndices.push(indexAt(ix, 0));
+      }
+    } else if (edge === "north") {
+      for (let ix = 0; ix <= segments; ix += 1) {
+        topIndices.push(indexAt(ix, segments));
+      }
+    } else if (edge === "west") {
+      for (let iz = 0; iz <= segments; iz += 1) {
+        topIndices.push(indexAt(0, iz));
+      }
+    } else {
+      for (let iz = 0; iz <= segments; iz += 1) {
+        topIndices.push(indexAt(segments, iz));
+      }
+    }
+
+    const skirtStart = positions.length / 3;
+
+    for (const topIndex of topIndices) {
+      const base = topIndex * 3;
+      positions.push(positions[base], positions[base + 1] - settings.skirtDepth, positions[base + 2]);
+      colors.push(colors[base], colors[base + 1], colors[base + 2]);
+      normals.push(normals[base], normals[base + 1], normals[base + 2]);
+    }
+
+    for (let index = 0; index < topIndices.length - 1; index += 1) {
+      const topA = topIndices[index];
+      const topB = topIndices[index + 1];
+      const skirtA = skirtStart + index;
+      const skirtB = skirtStart + index + 1;
+      indices.push(topA, topB, skirtA, topB, skirtB, skirtA);
+    }
+  };
+
+  if (leaf.seams.south) {
+    addSkirt("south");
+  }
+  if (leaf.seams.north) {
+    addSkirt("north");
+  }
+  if (leaf.seams.west) {
+    addSkirt("west");
+  }
+  if (leaf.seams.east) {
+    addSkirt("east");
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+  geometry.setIndex(indices);
+  return geometry;
+}
+
+function createTerrainBounds(leaf: TerrainLeaf): THREE.Line {
+  const points = [
+    new THREE.Vector3(leaf.minX, 0.12 + leaf.level * 0.02, leaf.minZ),
+    new THREE.Vector3(leaf.maxX, 0.12 + leaf.level * 0.02, leaf.minZ),
+    new THREE.Vector3(leaf.maxX, 0.12 + leaf.level * 0.02, leaf.maxZ),
+    new THREE.Vector3(leaf.minX, 0.12 + leaf.level * 0.02, leaf.maxZ),
+    new THREE.Vector3(leaf.minX, 0.12 + leaf.level * 0.02, leaf.minZ),
+  ];
+  const geometry = new THREE.BufferGeometry().setFromPoints(points);
+  const material = new THREE.LineBasicMaterial({
+    color: leaf.level >= 4 ? "#ffe29f" : "#77d8ff",
+    transparent: true,
+    opacity: 0.72,
+  });
+  return new THREE.Line(geometry, material);
 }
 
 const examples: ExampleDefinition[] = [
@@ -118,7 +940,7 @@ const examples: ExampleDefinition[] = [
     title: "Triangle",
     summary: "Start from raw positions and vertex colors so the scene graph stays out of the way.",
     notes:
-      "This is the smallest useful Three.js WebGPU mesh: a custom BufferGeometry, one material, one camera, one orbitable canvas.",
+      "Each corner is pure red, green, or blue so you can see barycentric color interpolation directly across the face of the triangle.",
     tags: ["BufferGeometry", "Vertex colors", "Camera basics"],
     cameraPosition: [0.5, 0.4, 2.2],
     create: ({ scene }) => {
@@ -135,7 +957,7 @@ const examples: ExampleDefinition[] = [
       geometry.setAttribute(
         "color",
         new THREE.Float32BufferAttribute(
-          [0.25, 0.74, 1.0, 1.0, 0.58, 0.24, 0.42, 1.0, 0.72],
+          [1, 0, 0, 0, 1, 0, 0, 0, 1],
           3,
         ),
       );
@@ -282,10 +1104,10 @@ const examples: ExampleDefinition[] = [
   },
   {
     step: "Step 04",
-    title: "Lighting",
-    summary: "Introduce normals, physically based materials, and lights that move through the scene.",
+    title: "Lighting Fundamentals",
+    summary: "Start with a compact PBR setup so you can see how a few common lights sculpt the same materials.",
     notes:
-      "Orbit around the knot and sphere to see how roughness, metalness, and shadows respond to the directional and point lights.",
+      "This is the first place roughness, metalness, specular highlights, and shadows start talking to each other. Use the IMGUI to solo the major contributors.",
     tags: ["MeshStandardMaterial", "Shadows", "PBR lighting"],
     cameraPosition: [5.5, 3.2, 6.5],
     target: [0, 1, 0],
@@ -348,15 +1170,904 @@ const examples: ExampleDefinition[] = [
 
       scene.add(ambient, hemi, sun, pointRig, knot, sphere);
 
+      const controlsState = {
+        ambient: ambient.intensity,
+        hemisphere: hemi.intensity,
+        sun: sun.intensity,
+        point: point.intensity,
+        animate: true,
+      };
+
       return {
         update: (elapsed) => {
+          if (!controlsState.animate) {
+            return;
+          }
+
           knot.rotation.x = elapsed * 0.4;
           knot.rotation.y = elapsed * 0.65;
           sphere.position.y = 1.1 + Math.sin(elapsed * 1.2) * 0.18;
           pointRig.rotation.y = elapsed * 0.8;
         },
+        setupGui: ({ gui }) => {
+          const folder = gui.addFolder("Lighting");
+          folder
+            .add(controlsState, "ambient", 0, 1.5, 0.01)
+            .name("ambient")
+            .onChange((value: number) => {
+              ambient.intensity = value;
+            });
+          folder
+            .add(controlsState, "hemisphere", 0, 2, 0.01)
+            .name("hemisphere")
+            .onChange((value: number) => {
+              hemi.intensity = value;
+            });
+          folder
+            .add(controlsState, "sun", 0, 4, 0.01)
+            .name("directional")
+            .onChange((value: number) => {
+              sun.intensity = value;
+            });
+          folder
+            .add(controlsState, "point", 0, 60, 0.1)
+            .name("point")
+            .onChange((value: number) => {
+              point.intensity = value;
+            });
+          folder.add(controlsState, "animate").name("animate");
+        },
         dispose: () => {
           disposeSceneResources([floor, knot, sphere, pointMesh]);
+        },
+      };
+    },
+  },
+  {
+    step: "Step 04B",
+    title: "Light Types Studio",
+    summary: "Layer ambient, hemisphere, directional, point, and spot lights so you can feel what each one adds.",
+    notes:
+      "This is the comparison lab. Toggle lights individually, turn on helpers, and watch how some lights fill globally while others create direction, falloff, and theatrical focus.",
+    tags: ["AmbientLight", "SpotLight", "Helpers"],
+    cameraPosition: [8.2, 4.5, 7.4],
+    target: [0, 1.4, 0],
+    create: ({ scene }) => {
+      scene.background = new THREE.Color("#09111c");
+
+      const floor = new THREE.Mesh(
+        new THREE.CircleGeometry(7.6, 72),
+        new THREE.MeshStandardMaterial({
+          color: "#112334",
+          roughness: 0.96,
+          metalness: 0.02,
+        }),
+      );
+      floor.rotation.x = -Math.PI / 2;
+      floor.receiveShadow = true;
+
+      const pedestal = new THREE.Mesh(
+        new THREE.CylinderGeometry(2.4, 2.8, 0.7, 40),
+        new THREE.MeshStandardMaterial({
+          color: "#173042",
+          roughness: 0.92,
+          metalness: 0.05,
+        }),
+      );
+      pedestal.position.y = 0.35;
+      pedestal.receiveShadow = true;
+      pedestal.castShadow = true;
+
+      const heroGroup = new THREE.Group();
+      const knot = new THREE.Mesh(
+        new THREE.TorusKnotGeometry(0.86, 0.28, 168, 24),
+        new THREE.MeshStandardMaterial({
+          color: "#84e0ff",
+          roughness: 0.18,
+          metalness: 0.62,
+        }),
+      );
+      knot.position.set(-1.2, 1.95, 0.2);
+      knot.castShadow = true;
+
+      const matteSphere = new THREE.Mesh(
+        new THREE.SphereGeometry(0.8, 48, 32),
+        new THREE.MeshStandardMaterial({
+          color: "#ffb66c",
+          roughness: 0.84,
+          metalness: 0.04,
+        }),
+      );
+      matteSphere.position.set(1.4, 1.45, -0.25);
+      matteSphere.castShadow = true;
+
+      const glossyBox = new THREE.Mesh(
+        new THREE.BoxGeometry(1.1, 1.1, 1.1, 4, 4, 4),
+        new THREE.MeshStandardMaterial({
+          color: "#dce9ff",
+          roughness: 0.24,
+          metalness: 0.14,
+        }),
+      );
+      glossyBox.position.set(0.15, 1.1, 1.45);
+      glossyBox.castShadow = true;
+
+      heroGroup.add(knot, matteSphere, glossyBox);
+
+      const ambient = new THREE.AmbientLight("#8eb9ff", 0.25);
+      const hemi = new THREE.HemisphereLight("#8ac8ff", "#070e17", 0.68);
+      const directional = new THREE.DirectionalLight("#fff5db", 1.5);
+      directional.position.set(4.8, 5.8, 3.2);
+      directional.castShadow = true;
+      directional.shadow.mapSize.set(1024, 1024);
+      directional.shadow.camera.left = -5;
+      directional.shadow.camera.right = 5;
+      directional.shadow.camera.top = 5;
+      directional.shadow.camera.bottom = -5;
+
+      const point = new THREE.PointLight("#ff8c6c", 22, 14, 2);
+      point.position.set(0, 2.7, 0);
+      point.castShadow = true;
+
+      const pointOrb = new THREE.Mesh(
+        new THREE.SphereGeometry(0.12, 18, 18),
+        new THREE.MeshBasicMaterial({ color: "#ffd0c0" }),
+      );
+      point.add(pointOrb);
+
+      const spot = new THREE.SpotLight("#7ad6ff", 26, 18, Math.PI / 7, 0.36, 1.2);
+      spot.position.set(-4.8, 5.8, 4.4);
+      const spotlightTarget = new THREE.Object3D();
+      spotlightTarget.position.set(0, 1.55, 0);
+      spot.target = spotlightTarget;
+      spot.castShadow = true;
+      spot.shadow.mapSize.set(1024, 1024);
+
+      const ambientHelper = new THREE.HemisphereLightHelper(hemi, 0.65);
+      const directionalHelper = new THREE.DirectionalLightHelper(directional, 0.85, "#ffe2ba");
+      const pointHelper = new THREE.PointLightHelper(point, 0.34, "#ffbba5");
+      const spotHelper = new THREE.SpotLightHelper(spot, "#89ddff");
+      ambientHelper.visible = false;
+      directionalHelper.visible = false;
+      pointHelper.visible = false;
+      spotHelper.visible = false;
+
+      const pointRig = new THREE.Group();
+      pointRig.add(point);
+      point.position.set(2.8, 2.8, 0);
+
+      scene.add(
+        floor,
+        pedestal,
+        heroGroup,
+        ambient,
+        hemi,
+        directional,
+        pointRig,
+        spot,
+        spotlightTarget,
+        ambientHelper,
+        directionalHelper,
+        pointHelper,
+        spotHelper,
+      );
+
+      const state = {
+        ambient: true,
+        hemisphere: true,
+        directional: true,
+        point: true,
+        spot: true,
+        showHelpers: false,
+        rotateDisplay: true,
+      };
+
+      const syncLighting = () => {
+        ambient.visible = state.ambient;
+        hemi.visible = state.hemisphere;
+        directional.visible = state.directional;
+        point.visible = state.point;
+        spot.visible = state.spot;
+        ambientHelper.visible = state.showHelpers && state.hemisphere;
+        directionalHelper.visible = state.showHelpers && state.directional;
+        pointHelper.visible = state.showHelpers && state.point;
+        spotHelper.visible = state.showHelpers && state.spot;
+      };
+
+      syncLighting();
+
+      return {
+        update: (elapsed) => {
+          if (state.rotateDisplay) {
+            heroGroup.rotation.y = elapsed * 0.22;
+          }
+
+          knot.rotation.x = elapsed * 0.38;
+          knot.rotation.y = elapsed * 0.66;
+          glossyBox.rotation.y = -elapsed * 0.48;
+          pointRig.rotation.y = elapsed * 0.58;
+          point.position.y = 2.35 + Math.sin(elapsed * 1.3) * 0.55;
+          spot.position.x = Math.cos(elapsed * 0.36) * 5.2;
+          spot.position.z = Math.sin(elapsed * 0.36) * 5.2;
+          ambientHelper.update();
+          directionalHelper.update();
+          pointHelper.update();
+          spotHelper.update();
+        },
+        setupGui: ({ gui }) => {
+          const folder = gui.addFolder("Light types");
+          folder.add(state, "ambient").name("ambient").onChange(syncLighting);
+          folder.add(state, "hemisphere").name("hemisphere").onChange(syncLighting);
+          folder.add(state, "directional").name("directional").onChange(syncLighting);
+          folder.add(state, "point").name("point").onChange(syncLighting);
+          folder.add(state, "spot").name("spot").onChange(syncLighting);
+          folder.add(state, "showHelpers").name("helpers").onChange(syncLighting);
+          folder.add(state, "rotateDisplay").name("turntable");
+        },
+        dispose: () => {
+          disposeSceneResources([
+            floor,
+            pedestal,
+            knot,
+            matteSphere,
+            glossyBox,
+            pointOrb,
+            ambientHelper,
+            directionalHelper,
+            pointHelper,
+            spotHelper,
+            spotlightTarget,
+          ]);
+        },
+      };
+    },
+  },
+  {
+    step: "Step 04C",
+    title: "Shadow Playground",
+    summary: "Compare shadow casters, shadow map filters, helper frusta, and bias settings in one controllable scene.",
+    notes:
+      "Shadows are where a lot of real-time rendering pain hides. This card is intentionally a little fussy so you can see acne, peter-panning, softening, and light-specific tradeoffs in context.",
+    tags: ["Directional shadow", "Spot shadow", "Shadow bias"],
+    cameraPosition: [8.6, 5.1, 8.1],
+    target: [0, 1.6, 0],
+    create: ({ scene, renderer }) => {
+      scene.background = new THREE.Color("#080f19");
+
+      const floor = new THREE.Mesh(
+        new THREE.PlaneGeometry(18, 18),
+        new THREE.MeshStandardMaterial({
+          color: "#0f2130",
+          roughness: 0.98,
+          metalness: 0.02,
+        }),
+      );
+      floor.rotation.x = -Math.PI / 2;
+      floor.receiveShadow = true;
+
+      const stage = new THREE.Group();
+
+      for (let index = 0; index < 7; index += 1) {
+        const columnHeight = 1.4 + index * 0.18;
+        const column = new THREE.Mesh(
+          new THREE.BoxGeometry(0.7, columnHeight, 0.7),
+          new THREE.MeshStandardMaterial({
+            color: index % 2 === 0 ? "#5f95bf" : "#d8e5f8",
+            roughness: 0.55,
+            metalness: 0.08,
+          }),
+        );
+        const angle = index / 7 * Math.PI * 2;
+        column.position.set(Math.cos(angle) * 3.15, columnHeight * 0.5, Math.sin(angle) * 3.15);
+        column.castShadow = true;
+        column.receiveShadow = true;
+        stage.add(column);
+      }
+
+      const arch = new THREE.Mesh(
+        new THREE.TorusGeometry(1.85, 0.24, 18, 72, Math.PI),
+        new THREE.MeshStandardMaterial({
+          color: "#78d8ff",
+          roughness: 0.18,
+          metalness: 0.52,
+        }),
+      );
+      arch.rotation.z = Math.PI;
+      arch.position.set(0, 2.55, 0);
+      arch.castShadow = true;
+      stage.add(arch);
+
+      const centerpiece = new THREE.Mesh(
+        new THREE.IcosahedronGeometry(0.92, 2),
+        new THREE.MeshStandardMaterial({
+          color: "#ffba75",
+          roughness: 0.32,
+          metalness: 0.08,
+        }),
+      );
+      centerpiece.position.y = 1.55;
+      centerpiece.castShadow = true;
+      stage.add(centerpiece);
+
+      const ambient = new THREE.AmbientLight("#8fb5ff", 0.18);
+      const hemi = new THREE.HemisphereLight("#8cc1ff", "#060d16", 0.38);
+
+      const sun = new THREE.DirectionalLight("#fff4dc", 1.45);
+      sun.position.set(4.8, 7.4, 3.8);
+      sun.castShadow = true;
+      sun.shadow.mapSize.set(1024, 1024);
+      sun.shadow.camera.left = -6;
+      sun.shadow.camera.right = 6;
+      sun.shadow.camera.top = 6;
+      sun.shadow.camera.bottom = -6;
+      sun.shadow.normalBias = 0.18;
+
+      const spot = new THREE.SpotLight("#88dbff", 24, 20, Math.PI / 6, 0.28, 1.1);
+      spot.position.set(-5.4, 7.1, 4.2);
+      const spotlightTarget = new THREE.Object3D();
+      spotlightTarget.position.set(0, 1.6, 0);
+      spot.target = spotlightTarget;
+      spot.castShadow = true;
+      spot.shadow.mapSize.set(1024, 1024);
+      spot.shadow.normalBias = 0.18;
+
+      const lantern = new THREE.PointLight("#ff9267", 45, 15, 2);
+      lantern.position.set(0, 3.8, 0);
+      lantern.castShadow = true;
+      lantern.shadow.mapSize.set(1024, 1024);
+      lantern.shadow.normalBias = 0.18;
+
+      const lanternOrb = new THREE.Mesh(
+        new THREE.SphereGeometry(0.14, 20, 20),
+        new THREE.MeshBasicMaterial({ color: "#ffd6c6" }),
+      );
+      lantern.add(lanternOrb);
+
+      const sunCameraHelper = new THREE.CameraHelper(sun.shadow.camera);
+      const spotCameraHelper = new THREE.CameraHelper(spot.shadow.camera);
+      const spotHelper = new THREE.SpotLightHelper(spot, "#97e2ff");
+      const pointHelper = new THREE.PointLightHelper(lantern, 0.42, "#ffc7a4");
+
+      scene.add(
+        floor,
+        stage,
+        ambient,
+        hemi,
+        sun,
+        spot,
+        spotlightTarget,
+        lantern,
+        sunCameraHelper,
+        spotCameraHelper,
+        spotHelper,
+        pointHelper,
+      );
+
+      const shadowState = {
+        caster: "all",
+        shadowType: "PCF Soft",
+        showHelpers: false,
+        animate: true,
+        bias: 0,
+        normalBias: 0.18,
+      };
+
+      const applyShadowCasterMode = () => {
+        sun.castShadow = shadowState.caster === "all" || shadowState.caster === "sun";
+        spot.castShadow = shadowState.caster === "all" || shadowState.caster === "spot";
+        lantern.castShadow = shadowState.caster === "all" || shadowState.caster === "point";
+      };
+
+      const applyShadowType = () => {
+        const typeMap = {
+          Basic: THREE.BasicShadowMap,
+          PCF: THREE.PCFShadowMap,
+          "PCF Soft": THREE.PCFSoftShadowMap,
+          VSM: THREE.VSMShadowMap,
+        } as const;
+
+        renderer.shadowMap.type = typeMap[shadowState.shadowType as keyof typeof typeMap];
+        (renderer.shadowMap as { needsUpdate?: boolean }).needsUpdate = true;
+      };
+
+      const applyBias = () => {
+        sun.shadow.bias = shadowState.bias;
+        spot.shadow.bias = shadowState.bias;
+        lantern.shadow.bias = shadowState.bias;
+        sun.shadow.normalBias = shadowState.normalBias;
+        spot.shadow.normalBias = shadowState.normalBias;
+        lantern.shadow.normalBias = shadowState.normalBias;
+      };
+
+      const syncHelpers = () => {
+        sunCameraHelper.visible = shadowState.showHelpers;
+        spotCameraHelper.visible = shadowState.showHelpers;
+        spotHelper.visible = shadowState.showHelpers;
+        pointHelper.visible = shadowState.showHelpers;
+      };
+
+      applyShadowCasterMode();
+      applyShadowType();
+      applyBias();
+      syncHelpers();
+
+      return {
+        update: (elapsed) => {
+          if (shadowState.animate) {
+            stage.rotation.y = elapsed * 0.18;
+            centerpiece.rotation.x = elapsed * 0.58;
+            centerpiece.rotation.y = elapsed * 0.86;
+            spotlightTarget.position.copy(centerpiece.position);
+            lantern.position.x = Math.cos(elapsed * 0.72) * 3.4;
+            lantern.position.z = Math.sin(elapsed * 0.72) * 3.4;
+            lantern.position.y = 3.5 + Math.sin(elapsed * 1.4) * 0.42;
+            spot.position.x = Math.cos(elapsed * 0.28 + 1.2) * 5.8;
+            spot.position.z = Math.sin(elapsed * 0.28 + 1.2) * 5.8;
+            sun.position.x = Math.cos(elapsed * 0.16) * 6.2;
+            sun.position.z = Math.sin(elapsed * 0.16) * 4.8;
+          }
+
+          sunCameraHelper.update();
+          spotCameraHelper.update();
+          spotHelper.update();
+          pointHelper.update();
+        },
+        setupGui: ({ gui }) => {
+          const folder = gui.addFolder("Shadows");
+          folder
+            .add(shadowState, "caster", {
+              All: "all",
+              Directional: "sun",
+              Spot: "spot",
+              Point: "point",
+            })
+            .name("shadow caster")
+            .onChange(applyShadowCasterMode);
+          folder
+            .add(shadowState, "shadowType", {
+              Basic: "Basic",
+              PCF: "PCF",
+              "PCF Soft": "PCF Soft",
+              VSM: "VSM",
+            })
+            .name("shadow filter")
+            .onChange(applyShadowType);
+          folder
+            .add(shadowState, "bias", -0.01, 0.01, 0.0001)
+            .name("bias")
+            .onChange(applyBias);
+          folder
+            .add(shadowState, "normalBias", 0, 1, 0.01)
+            .name("normal bias")
+            .onChange(applyBias);
+          folder.add(shadowState, "showHelpers").name("helpers").onChange(syncHelpers);
+          folder.add(shadowState, "animate").name("animate");
+        },
+        dispose: () => {
+          disposeSceneResources([
+            floor,
+            lanternOrb,
+            spotlightTarget,
+            sunCameraHelper,
+            spotCameraHelper,
+            spotHelper,
+            pointHelper,
+            ...stage.children,
+          ]);
+        },
+      };
+    },
+  },
+  {
+    step: "Step 04D",
+    title: "PBR Lookdev Board",
+    summary: "Lay out a full material-ball board so roughness, metalness, transmission, and shader-authored surfaces can be compared under one studio rig.",
+    notes:
+      "This is the kind of scene you use to judge whether a shader is actually good. The rows sweep dielectrics, metals, clearcoat, transmission, and custom node-driven looks while sharing the same environment and lights.",
+    tags: ["MeshPhysicalMaterial", "PMREM", "MeshPhysicalNodeMaterial"],
+    cameraPosition: [-1.8, 5.4, 12.2],
+    target: [0, 1.1, -0.2],
+    create: ({ scene, renderer }) => {
+      scene.background = new THREE.Color("#c6cdd7");
+      scene.fog = new THREE.Fog("#c6cdd7", 18, 34);
+      renderer.toneMappingExposure = 0.95;
+      const lookdevFloorTexture = createLookdevFloorTexture();
+      lookdevFloorTexture.repeat.set(3.5, 2.5);
+
+      const studioState = {
+        envIntensity: 0.62,
+        exposure: 0.95,
+        keyIntensity: 1.18,
+        fillIntensity: 0.1,
+        rimIntensity: 0.62,
+        accentIntensity: 8,
+        animateLights: false,
+        showProps: true,
+        metals: true,
+        dielectrics: true,
+        clearcoat: true,
+        transmission: true,
+        shaders: true,
+      };
+
+      const roomEnvironment = new RoomEnvironment();
+      const pmremGenerator = new THREE.PMREMGenerator(renderer);
+      const environmentTarget = pmremGenerator.fromScene(roomEnvironment, 0.03);
+      scene.environment = environmentTarget.texture;
+
+      const trackedMaterials: Array<THREE.Material & { envMapIntensity?: number }> = [];
+      const registerMaterial = <T extends THREE.Material & { envMapIntensity?: number }>(material: T): T => {
+        if ("envMapIntensity" in material) {
+          material.envMapIntensity = studioState.envIntensity;
+        }
+
+        trackedMaterials.push(material);
+        return material;
+      };
+
+      const createPhysicalMaterial = (parameters: THREE.MeshPhysicalMaterialParameters) =>
+        registerMaterial(new THREE.MeshPhysicalMaterial(parameters));
+
+      const createNodePhysicalMaterial = (configure: (material: THREE.MeshPhysicalNodeMaterial) => void) => {
+        const material = registerMaterial(new THREE.MeshPhysicalNodeMaterial());
+        configure(material);
+        return material;
+      };
+
+      const stage = new THREE.Mesh(
+        new THREE.BoxGeometry(15.4, 0.34, 10.6),
+        createPhysicalMaterial({
+          color: "#4f5867",
+          roughness: 0.88,
+          metalness: 0.03,
+          clearcoat: 0.1,
+          clearcoatRoughness: 0.48,
+        }),
+      );
+      stage.position.y = -0.2;
+      stage.receiveShadow = true;
+
+      const stageTop = new THREE.Mesh(
+        new THREE.PlaneGeometry(14.9, 10.1),
+        createPhysicalMaterial({
+          color: "#b7c0cb",
+          map: lookdevFloorTexture,
+          roughness: 0.94,
+          metalness: 0.02,
+          clearcoat: 0.02,
+          clearcoatRoughness: 0.56,
+        }),
+      );
+      stageTop.rotation.x = -Math.PI / 2;
+      stageTop.position.y = -0.02;
+      stageTop.receiveShadow = true;
+
+      const key = new THREE.DirectionalLight("#fff7ec", studioState.keyIntensity);
+      key.position.set(5.8, 8.4, 4.6);
+      key.castShadow = true;
+      key.shadow.mapSize.set(1024, 1024);
+      key.shadow.camera.left = -9;
+      key.shadow.camera.right = 9;
+      key.shadow.camera.top = 9;
+      key.shadow.camera.bottom = -9;
+      key.shadow.normalBias = 0.18;
+
+      const shadowSpot = new THREE.SpotLight("#fff4dc", studioState.keyIntensity * 7.5, 28, Math.PI / 5, 0.34, 1.1);
+      shadowSpot.position.set(0.8, 9.8, 4.2);
+      shadowSpot.target = stageTop;
+      shadowSpot.castShadow = true;
+      shadowSpot.shadow.mapSize.set(2048, 2048);
+      shadowSpot.shadow.bias = -0.00015;
+      shadowSpot.shadow.normalBias = 0.12;
+
+      const fill = new THREE.HemisphereLight("#c1d9ff", "#66758f", studioState.fillIntensity);
+      const rim = new THREE.DirectionalLight("#c7d7ff", studioState.rimIntensity);
+      rim.position.set(-6.2, 5.3, -3.8);
+
+      const accentRig = new THREE.Group();
+      const accent = new THREE.PointLight("#ffd9b7", studioState.accentIntensity, 18, 2);
+      accent.position.set(0, 4.2, 2.6);
+      const accentMarker = new THREE.Mesh(
+        new THREE.SphereGeometry(0.08, 16, 16),
+        new THREE.MeshBasicMaterial({ color: "#fff0d9" }),
+      );
+      accent.add(accentMarker);
+      accentRig.add(accent);
+
+      scene.add(stage, stageTop, key, shadowSpot, fill, rim, accentRig);
+
+      const sphereGeometry = new THREE.SphereGeometry(0.56, 48, 32);
+      const capsuleGeometry = new THREE.CapsuleGeometry(0.34, 1.24, 6, 18);
+      const rowSpacing = 1.72;
+      const columnSpacing = 1.92;
+      const columns = 6;
+      const lastColumn = Math.max(columns - 1, 1);
+
+      const shaderFactories = [
+        () =>
+          createNodePhysicalMaterial((material) => {
+            const brushed = sin(positionLocal.y.mul(76).add(positionLocal.x.mul(12))).mul(0.5).add(0.5);
+            material.metalness = 1;
+            material.roughness = 0.18;
+            material.colorNode = mix(color("#1b2430"), color("#dce8ff"), brushed);
+            material.roughnessNode = brushed.mul(0.07).add(0.11);
+            material.metalnessNode = brushed.mul(0.2).add(0.8);
+          }),
+        () =>
+          createNodePhysicalMaterial((material) => {
+            const wave = sin(positionLocal.x.mul(14).add(cos(positionLocal.z.mul(18)).mul(4))).mul(0.5).add(0.5);
+            material.roughness = 0.24;
+            material.metalness = 0.04;
+            material.clearcoat = 1;
+            material.clearcoatRoughness = 0.04;
+            material.colorNode = mix(color("#2f4fa8"), color("#94b6ff"), wave);
+            material.clearcoatNode = wave.mul(0.35).add(0.65);
+          }),
+        () =>
+          createNodePhysicalMaterial((material) => {
+            const cloud = sin(positionLocal.x.mul(10).add(positionLocal.z.mul(16)).add(cos(positionLocal.y.mul(18)).mul(3)))
+              .mul(0.5)
+              .add(0.5);
+            material.roughness = 0.62;
+            material.metalness = 0.02;
+            material.colorNode = mix(color("#5d4633"), color("#b38764"), cloud);
+            material.roughnessNode = cloud.mul(0.22).add(0.48);
+          }),
+        () =>
+          createNodePhysicalMaterial((material) => {
+            const pearl = normalLocal.y.mul(0.5).add(0.5);
+            const swirl = sin(positionLocal.x.mul(24).sub(positionLocal.z.mul(18))).mul(0.5).add(0.5);
+            material.roughness = 0.16;
+            material.metalness = 0.02;
+            material.iridescence = 1;
+            material.iridescenceIOR = 1.32;
+            material.iridescenceThicknessRange = [120, 620];
+            material.colorNode = mix(color("#6176d4"), color("#eef3ff"), pearl);
+            material.iridescenceNode = swirl.mul(0.5).add(0.5);
+          }),
+        () =>
+          createNodePhysicalMaterial((material) => {
+            const cross = sin(positionLocal.x.mul(42)).mul(sin(positionLocal.z.mul(42))).mul(0.5).add(0.5);
+            material.roughness = 0.32;
+            material.metalness = 0.78;
+            material.colorNode = mix(color("#20242d"), color("#8f98a6"), cross);
+            material.roughnessNode = cross.mul(0.14).add(0.18);
+            material.metalnessNode = cross.mul(0.18).add(0.72);
+          }),
+        () =>
+          createNodePhysicalMaterial((material) => {
+            const cells = sin(positionLocal.x.mul(20).add(cos(positionLocal.y.mul(30)).mul(5)).add(positionLocal.z.mul(12)))
+              .mul(0.5)
+              .add(0.5);
+            material.roughness = 0.52;
+            material.metalness = 0.06;
+            material.clearcoat = 1;
+            material.clearcoatRoughness = 0.08;
+            material.colorNode = mix(color("#295235"), color("#7cae6f"), cells);
+            material.roughnessNode = cells.mul(0.12).add(0.42);
+          }),
+      ];
+
+      const rowDefinitions = [
+        {
+          key: "metals",
+          materialAt: (column: number) => {
+            const t = column / lastColumn;
+            return createPhysicalMaterial({
+              color: new THREE.Color().setHSL(0.08 + t * 0.04, 0.26, 0.48),
+              metalness: 1,
+              roughness: 0.06 + t * 0.9,
+            });
+          },
+        },
+        {
+          key: "dielectrics",
+          materialAt: (column: number) => {
+            const palette = ["#7f8ca2", "#9a745d", "#60749c", "#5d6f5d", "#9d9d95", "#845149"];
+            const t = column / lastColumn;
+            return createPhysicalMaterial({
+              color: palette[column % palette.length],
+              metalness: 0,
+              roughness: 0.1 + t * 0.84,
+            });
+          },
+        },
+        {
+          key: "clearcoat",
+          materialAt: (column: number) => {
+            const palette = ["#243d7a", "#4f74d8", "#6fa8ff", "#86643f", "#2b6a65", "#8a2f3d"];
+            const t = column / lastColumn;
+            return createPhysicalMaterial({
+              color: palette[column % palette.length],
+              metalness: 0.08,
+              roughness: 0.35,
+              clearcoat: 1,
+              clearcoatRoughness: 0.02 + t * 0.42,
+            });
+          },
+        },
+        {
+          key: "transmission",
+          materialAt: (column: number) => {
+            const palette = ["#a7bdd7", "#a5cdd6", "#d7bf9f", "#cfbde6", "#add8bf", "#d8aeb0"];
+            const t = column / lastColumn;
+            return createPhysicalMaterial({
+              color: palette[column % palette.length],
+              roughness: 0.02 + t * 0.18,
+              metalness: 0,
+              transmission: 1,
+              thickness: 0.8 + t * 0.8,
+              ior: 1.08 + t * 0.7,
+              attenuationDistance: 1.8,
+              attenuationColor: new THREE.Color(palette[column % palette.length]).multiplyScalar(0.6),
+            });
+          },
+        },
+        {
+          key: "shaders",
+          materialAt: (column: number) => shaderFactories[column](),
+        },
+      ] as const;
+
+      const rowGroups: Record<string, THREE.Group> = {};
+
+      rowDefinitions.forEach((row, rowIndex) => {
+        const group = new THREE.Group();
+        rowGroups[row.key] = group;
+        group.position.z = (rowIndex - (rowDefinitions.length - 1) / 2) * rowSpacing;
+
+        for (let column = 0; column < columns; column += 1) {
+          const mesh = new THREE.Mesh(sphereGeometry, row.materialAt(column));
+          mesh.position.set(
+            (column - (columns - 1) / 2) * columnSpacing,
+            0.56,
+            (column % 2 === 0 ? 0.08 : -0.08) + Math.sin(column * 0.6 + rowIndex * 0.4) * 0.04,
+          );
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          group.add(mesh);
+        }
+
+        scene.add(group);
+      });
+
+      const props = new THREE.Group();
+      const propMaterials = [
+        createPhysicalMaterial({
+          color: "#aebdd8",
+          metalness: 1,
+          roughness: 0.18,
+        }),
+        createPhysicalMaterial({
+          color: "#d6d9e4",
+          roughness: 0.08,
+          transmission: 1,
+          thickness: 1.3,
+          ior: 1.3,
+        }),
+        createPhysicalMaterial({
+          color: "#627a5f",
+          roughness: 0.74,
+          metalness: 0.02,
+          clearcoat: 0.35,
+        }),
+        createPhysicalMaterial({
+          color: "#927660",
+          roughness: 0.46,
+          metalness: 0.12,
+        }),
+      ];
+
+      const propLayout = [
+        [-5.7, 0.94, -4.45],
+        [-1.9, 0.94, -4.7],
+        [2.1, 0.94, -4.55],
+        [5.4, 0.94, -4.35],
+      ];
+
+      propLayout.forEach(([x, y, z], index) => {
+        const prop = new THREE.Mesh(capsuleGeometry, propMaterials[index % propMaterials.length]);
+        prop.position.set(x, y, z);
+        prop.rotation.z = Math.PI / 2;
+        prop.rotation.y = index * 0.35 + 0.25;
+        prop.castShadow = true;
+        prop.receiveShadow = true;
+        props.add(prop);
+      });
+
+      scene.add(props);
+
+      const syncLookdev = () => {
+        renderer.toneMappingExposure = studioState.exposure;
+        key.intensity = studioState.keyIntensity;
+        shadowSpot.intensity = studioState.keyIntensity * 7.5;
+        fill.intensity = studioState.fillIntensity;
+        rim.intensity = studioState.rimIntensity;
+        accent.intensity = studioState.accentIntensity;
+
+        for (const material of trackedMaterials) {
+          if ("envMapIntensity" in material) {
+            material.envMapIntensity = studioState.envIntensity;
+          }
+        }
+      };
+
+      const syncVisibility = () => {
+        rowGroups.metals.visible = studioState.metals;
+        rowGroups.dielectrics.visible = studioState.dielectrics;
+        rowGroups.clearcoat.visible = studioState.clearcoat;
+        rowGroups.transmission.visible = studioState.transmission;
+        rowGroups.shaders.visible = studioState.shaders;
+        props.visible = studioState.showProps;
+      };
+
+      syncLookdev();
+      syncVisibility();
+
+      return {
+        update: (elapsed) => {
+          if (!studioState.animateLights) {
+            return;
+          }
+
+          accentRig.rotation.y = elapsed * 0.2;
+          accent.position.y = 3.7 + Math.sin(elapsed * 1.1) * 0.6;
+          key.position.x = Math.cos(elapsed * 0.18) * 6.4;
+          key.position.z = Math.sin(elapsed * 0.18) * 5.2;
+        },
+        setupGui: ({ gui }) => {
+          const lookdevFolder = gui.addFolder("PBR lab");
+          lookdevFolder
+            .add(studioState, "envIntensity", 0, 2.8, 0.05)
+            .name("env intensity")
+            .onChange(syncLookdev);
+          lookdevFolder
+            .add(studioState, "exposure", 0.8, 1.9, 0.01)
+            .name("exposure")
+            .onChange(syncLookdev);
+          lookdevFolder
+            .add(studioState, "keyIntensity", 0, 3.5, 0.01)
+            .name("key")
+            .onChange(syncLookdev);
+          lookdevFolder
+            .add(studioState, "fillIntensity", 0, 1.5, 0.01)
+            .name("fill")
+            .onChange(syncLookdev);
+          lookdevFolder
+            .add(studioState, "rimIntensity", 0, 2.5, 0.01)
+            .name("rim")
+            .onChange(syncLookdev);
+          lookdevFolder
+            .add(studioState, "accentIntensity", 0, 40, 0.25)
+            .name("accent")
+            .onChange(syncLookdev);
+          lookdevFolder.add(studioState, "animateLights").name("animate lights");
+
+          const rowsFolder = gui.addFolder("Rows");
+          rowsFolder.add(studioState, "metals").name("metals").onChange(syncVisibility);
+          rowsFolder.add(studioState, "dielectrics").name("dielectrics").onChange(syncVisibility);
+          rowsFolder.add(studioState, "clearcoat").name("clearcoat").onChange(syncVisibility);
+          rowsFolder.add(studioState, "transmission").name("transmission").onChange(syncVisibility);
+          rowsFolder.add(studioState, "shaders").name("shader row").onChange(syncVisibility);
+          rowsFolder.add(studioState, "showProps").name("back props").onChange(syncVisibility);
+        },
+        dispose: () => {
+          scene.environment = null;
+          roomEnvironment.dispose();
+          environmentTarget.dispose();
+          pmremGenerator.dispose();
+          lookdevFloorTexture.dispose();
+          sphereGeometry.dispose();
+          capsuleGeometry.dispose();
+          stage.geometry.dispose();
+          stageTop.geometry.dispose();
+          accentMarker.geometry.dispose();
+
+          for (const material of trackedMaterials) {
+            material.dispose();
+          }
+
+          (accentMarker.material as THREE.Material).dispose();
         },
       };
     },
@@ -1108,19 +2819,24 @@ const examples: ExampleDefinition[] = [
   {
     step: "Step 14",
     title: "Skinning",
-    summary: "Animate a mesh with bones instead of moving the vertices manually.",
+    summary: "Load a real rigged character, switch between animation clips, and inspect the skeleton that drives the deformation.",
     notes:
-      "This example creates a little skinned tentacle from scratch, binds a skeleton, and then waves the bones to show how character rigs deform geometry.",
-    tags: ["SkinnedMesh", "Bones", "Skeleton"],
-    cameraPosition: [5.2, 3.8, 6.8],
-    target: [0, 1.6, 0],
+      "This card now uses the official RobotExpressive sample from the Three.js example assets, so you can study a proper skinned character, animation clips, mixer actions, and a skeleton helper on a real rig.",
+    tags: ["GLTFLoader", "AnimationMixer", "SkeletonHelper", "Animation clips"],
+    cameraPosition: [5.8, 3.4, 6.2],
+    target: [0, 1.45, 0],
     create: ({ scene }) => {
       scene.background = new THREE.Color("#09121c");
 
       const ambient = new THREE.AmbientLight("#92baff", 0.5);
       const key = new THREE.DirectionalLight("#ffffff", 1.85);
       key.position.set(4, 6, 3);
-      scene.add(ambient, key);
+      key.castShadow = true;
+      key.shadow.mapSize.set(1024, 1024);
+      key.shadow.normalBias = 0.14;
+      const rim = new THREE.DirectionalLight("#98c9ff", 0.8);
+      rim.position.set(-4, 5, -2);
+      scene.add(ambient, key, rim);
 
       const floor = new THREE.Mesh(
         new THREE.CircleGeometry(6, 64),
@@ -1130,74 +2846,251 @@ const examples: ExampleDefinition[] = [
           metalness: 0.04,
         }),
       );
+      floor.userData.skipGlobalWireframe = true;
       floor.rotation.x = -Math.PI / 2;
       floor.receiveShadow = true;
-      scene.add(floor);
+      const podium = new THREE.Mesh(
+        new THREE.CylinderGeometry(1.05, 1.18, 0.24, 48),
+        new THREE.MeshStandardMaterial({
+          color: "#173149",
+          roughness: 0.82,
+          metalness: 0.08,
+        }),
+      );
+      podium.userData.skipGlobalWireframe = true;
+      podium.position.y = 0.12;
+      podium.castShadow = true;
+      podium.receiveShadow = true;
 
-      const segmentHeight = 0.72;
-      const segmentCount = 6;
-      const height = segmentHeight * segmentCount;
-      const geometry = new THREE.BoxGeometry(0.55, height, 0.55, 2, segmentCount * 3, 2);
-      const position = geometry.attributes.position;
-      const vertex = new THREE.Vector3();
-      const skinIndices: number[] = [];
-      const skinWeights: number[] = [];
+      const loadingProxy = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.34, 1.3, 6, 18),
+        new THREE.MeshStandardMaterial({
+          color: "#7be0ff",
+          roughness: 0.42,
+          metalness: 0.08,
+        }),
+      );
+      const staticWireframeOverlays: MeshWireframeOverlay[] = [];
+      loadingProxy.userData.skipGlobalWireframe = true;
+      loadingProxy.position.y = 1;
+      loadingProxy.castShadow = true;
 
-      for (let i = 0; i < position.count; i += 1) {
-        vertex.fromBufferAttribute(position, i);
-
-        const y = vertex.y + height / 2;
-        const skinIndex = Math.min(Math.floor(y / segmentHeight), segmentCount - 1);
-        const skinWeight = (y % segmentHeight) / segmentHeight;
-
-        skinIndices.push(skinIndex, skinIndex + 1, 0, 0);
-        skinWeights.push(1 - skinWeight, skinWeight, 0, 0);
+      for (const mesh of [floor, podium, loadingProxy]) {
+        const overlay = createMeshWireframeOverlay(mesh);
+        if (overlay) {
+          staticWireframeOverlays.push(overlay);
+        }
       }
 
-      geometry.setAttribute("skinIndex", new THREE.Uint16BufferAttribute(skinIndices, 4));
-      geometry.setAttribute("skinWeight", new THREE.Float32BufferAttribute(skinWeights, 4));
+      scene.add(floor, podium, loadingProxy);
 
-      const bones: THREE.Bone[] = [];
-      const rootBone = new THREE.Bone();
-      rootBone.position.y = -height / 2;
-      bones.push(rootBone);
+      const loader = new GLTFLoader();
+      const skinState = {
+        showSkeleton: false,
+        timeScale: 1,
+        turntable: false,
+        clip: "Loading...",
+      };
+      let disposed = false;
+      let wireframeEnabled = false;
+      let mixer: THREE.AnimationMixer | null = null;
+      let characterRoot: THREE.Object3D | null = null;
+      let skeletonHelper: THREE.SkeletonHelper | null = null;
+      let activeAction: THREE.AnimationAction | null = null;
+      let clips: THREE.AnimationClip[] = [];
+      const skinnedWireframeOverlays: SkinnedWireframeOverlay[] = [];
+      let clipController: (ReturnType<GUI["add"]> & {
+        options?: (values: string[] | Record<string, string>) => unknown;
+      }) | null = null;
 
-      let previousBone = rootBone;
-      for (let i = 0; i < segmentCount; i += 1) {
-        const bone = new THREE.Bone();
-        bone.position.y = segmentHeight;
-        bones.push(bone);
-        previousBone.add(bone);
-        previousBone = bone;
-      }
+      const disposeCharacter = (root: THREE.Object3D) => {
+        const objects: THREE.Object3D[] = [];
+        root.traverse((object) => {
+          objects.push(object);
+        });
+        disposeSceneResources(objects);
+      };
 
-      const skeleton = new THREE.Skeleton(bones);
-      const material = new THREE.MeshStandardMaterial({
-        color: "#7be0ff",
-        roughness: 0.46,
-        metalness: 0.08,
-      });
-      const skinnedMesh = new THREE.SkinnedMesh(geometry, material);
-      skinnedMesh.frustumCulled = false;
-      skinnedMesh.add(rootBone);
-      skinnedMesh.bind(skeleton);
-      skinnedMesh.position.y = height / 2;
+      const syncSkeleton = () => {
+        if (skeletonHelper) {
+          skeletonHelper.visible = skinState.showSkeleton;
+        }
+      };
 
-      scene.add(skinnedMesh);
+      const playClip = (clipName: string) => {
+        if (!mixer || clips.length === 0) {
+          return;
+        }
 
-      return {
-        update: (elapsed) => {
-          for (let i = 1; i < bones.length; i += 1) {
-            const bone = bones[i];
-            bone.rotation.z = Math.sin(elapsed * 1.8 + i * 0.5) * 0.16;
-            bone.rotation.x = Math.cos(elapsed * 1.3 + i * 0.35) * 0.08;
+        const clip = THREE.AnimationClip.findByName(clips, clipName) ?? clips[0];
+
+        if (!clip) {
+          return;
+        }
+
+        const nextAction = mixer.clipAction(clip);
+        nextAction.enabled = true;
+        nextAction.reset();
+        nextAction.fadeIn(0.22);
+        nextAction.play();
+
+        if (activeAction && activeAction !== nextAction) {
+          activeAction.fadeOut(0.22);
+        }
+
+        activeAction = nextAction;
+        skinState.clip = clip.name;
+        clipController?.updateDisplay();
+      };
+
+      loader
+        .loadAsync("/models/RobotExpressive.glb")
+        .then((gltf) => {
+          if (disposed) {
+            disposeCharacter(gltf.scene);
+            return;
           }
 
-          skinnedMesh.rotation.y = Math.sin(elapsed * 0.35) * 0.35;
+          const model = gltf.scene;
+          const box = new THREE.Box3();
+          const size = new THREE.Vector3();
+          const center = new THREE.Vector3();
+          let firstSkinnedMesh: THREE.SkinnedMesh | null = null;
+
+          model.traverse((object) => {
+            if (object instanceof THREE.Mesh) {
+              object.castShadow = true;
+              object.receiveShadow = true;
+              object.userData.skipGlobalWireframe = true;
+            }
+
+            if ((object as THREE.Object3D & { isSkinnedMesh?: boolean }).isSkinnedMesh) {
+              const skinnedMesh = object as THREE.SkinnedMesh;
+              if (!firstSkinnedMesh) {
+                firstSkinnedMesh = skinnedMesh;
+              }
+
+              const overlay = createSkinnedWireframeOverlay(skinnedMesh);
+
+              if (overlay) {
+                overlay.setVisible(wireframeEnabled);
+                skinnedWireframeOverlays.push(overlay);
+              }
+            }
+          });
+
+          box.setFromObject(model);
+          box.getSize(size);
+          const scale = 3.2 / Math.max(size.y, 0.001);
+          model.scale.setScalar(scale);
+          box.setFromObject(model);
+          box.getCenter(center);
+          model.position.x -= center.x;
+          model.position.z -= center.z;
+          model.position.y -= box.min.y - 0.24;
+          model.rotation.y = Math.PI * 0.92;
+          characterRoot = model;
+          scene.add(model);
+
+          mixer = new THREE.AnimationMixer(model);
+          clips = gltf.animations;
+
+          if (clipController?.options) {
+            clipController.options(clips.map((clip) => clip.name));
+          }
+
+          const preferredClip =
+            clips.find((clip) => /walk/i.test(clip.name)) ??
+            clips.find((clip) => /idle/i.test(clip.name)) ??
+            clips[0] ??
+            null;
+
+          if (preferredClip) {
+            playClip(preferredClip.name);
+          }
+
+          if (firstSkinnedMesh) {
+            skeletonHelper = new THREE.SkeletonHelper(firstSkinnedMesh);
+            skeletonHelper.visible = skinState.showSkeleton;
+            scene.add(skeletonHelper);
+          }
+
+          loadingProxy.visible = false;
+        })
+        .catch((error) => {
+          console.error("Failed to load RobotExpressive", error);
+          const material = loadingProxy.material as THREE.MeshStandardMaterial;
+          material.color.set("#ff8f8f");
+          material.emissive.set("#5a1a1a");
+          material.emissiveIntensity = 0.45;
+        });
+
+      return {
+        update: (elapsed, delta) => {
+          if (mixer) {
+            mixer.update(delta * skinState.timeScale);
+          }
+
+          if (characterRoot && skinState.turntable) {
+            characterRoot.rotation.y = Math.PI + Math.sin(elapsed * 0.3) * 0.5;
+          }
+
+          for (const overlay of skinnedWireframeOverlays) {
+            overlay.update();
+          }
+
+          syncSkeleton();
+        },
+        setWireframe: (enabled) => {
+          wireframeEnabled = enabled;
+
+          for (const overlay of staticWireframeOverlays) {
+            overlay.setVisible(enabled);
+          }
+
+          for (const overlay of skinnedWireframeOverlays) {
+            overlay.setVisible(enabled);
+          }
+        },
+        setupGui: ({ gui }) => {
+          const folder = gui.addFolder("Skinning");
+          folder.add(skinState, "showSkeleton").name("skeleton").onChange(syncSkeleton);
+          clipController = folder.add(skinState, "clip", ["Loading..."]).name("clip");
+          clipController.onChange((value: string) => playClip(value));
+          folder.add(skinState, "timeScale", 0, 2, 0.01).name("time scale");
+          folder.add(skinState, "turntable").name("turntable");
         },
         dispose: () => {
-          geometry.dispose();
-          material.dispose();
+          disposed = true;
+
+          for (const overlay of staticWireframeOverlays) {
+            overlay.dispose();
+          }
+
+          for (const overlay of skinnedWireframeOverlays) {
+            overlay.dispose();
+          }
+
+          if (characterRoot) {
+            scene.remove(characterRoot);
+
+            if (mixer) {
+              mixer.stopAllAction();
+              mixer.uncacheRoot(characterRoot);
+            }
+
+            disposeCharacter(characterRoot);
+          }
+
+          if (skeletonHelper) {
+            scene.remove(skeletonHelper);
+            disposeSceneResources([skeletonHelper]);
+          }
+
+          loadingProxy.geometry.dispose();
+          (loadingProxy.material as THREE.Material).dispose();
+          podium.geometry.dispose();
+          (podium.material as THREE.Material).dispose();
           floor.geometry.dispose();
           (floor.material as THREE.Material).dispose();
         },
@@ -1206,105 +3099,279 @@ const examples: ExampleDefinition[] = [
   },
   {
     step: "Step 15",
-    title: "Terrain",
-    summary: "Generate a height field, paint it by elevation, and light it like a tiny world.",
+    title: "Quadtree Terrain",
+    summary: "Build terrain from quadtree patches, vary the LOD around the camera, and hide T-junction cracks with seam skirts.",
     notes:
-      "The terrain is CPU-authored once, then the renderer only has to draw it. That makes it a good place to learn geometry processing, normals, and debug-friendly data flow.",
-    tags: ["PlaneGeometry", "SimplexNoise", "Vertex colors"],
+      "This is much closer to an engine terrain pipeline: camera-driven patch selection, quadtree balancing, and seam repair on coarse-to-fine borders. Turn on patch bounds to inspect the hierarchy directly.",
+    tags: ["Quadtree LOD", "Seam skirts", "Patch bounds"],
     cameraPosition: [8.5, 6.4, 8.5],
     target: [0, 0.4, 0],
-    create: ({ scene }) => {
+    create: ({ scene, camera, controls }) => {
       scene.background = new THREE.Color("#07111a");
+      scene.fog = new THREE.Fog("#091421", 16, 34);
 
       const hemi = new THREE.HemisphereLight("#9fcbff", "#08111a", 0.85);
       const sun = new THREE.DirectionalLight("#fff2d2", 2.0);
       sun.position.set(7, 9, 4);
       sun.castShadow = true;
-      scene.add(hemi, sun);
-
-      const geometry = new THREE.PlaneGeometry(14, 14, 140, 140);
-      geometry.rotateX(-Math.PI / 2);
+      sun.shadow.mapSize.set(2048, 2048);
+      sun.shadow.camera.left = -14;
+      sun.shadow.camera.right = 14;
+      sun.shadow.camera.top = 14;
+      sun.shadow.camera.bottom = -14;
+      sun.shadow.normalBias = 0.2;
 
       const simplex = new SimplexNoise();
-      const positions = geometry.attributes.position;
-      const colors: number[] = [];
-      const worldPosition = new THREE.Vector3();
-      const surfaceColor = new THREE.Color();
-
-      for (let i = 0; i < positions.count; i += 1) {
-        worldPosition.fromBufferAttribute(positions, i);
-
-        const large = simplex.noise(worldPosition.x * 0.13, worldPosition.z * 0.13) * 1.7;
-        const medium = simplex.noise(worldPosition.x * 0.32 + 21, worldPosition.z * 0.32 + 11) * 0.65;
-        const small = simplex.noise(worldPosition.x * 0.75 + 8, worldPosition.z * 0.75 + 17) * 0.12;
-        const radial = Math.max(0, 1 - worldPosition.length() / 11.5) * 0.85;
-        const height = large + medium + small + radial - 0.3;
-
-        positions.setY(i, height);
-
-        if (height < -0.05) {
-          surfaceColor.set("#295f8d");
-        } else if (height < 0.4) {
-          surfaceColor.set("#8dbf6f");
-        } else if (height < 1.25) {
-          surfaceColor.set("#668c52");
-        } else {
-          surfaceColor.set("#c7d2dc");
-        }
-
-        colors.push(surfaceColor.r, surfaceColor.g, surfaceColor.b);
-      }
-
-      geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
-      geometry.computeVertexNormals();
-
-      const terrain = new THREE.Mesh(
-        geometry,
-        new THREE.MeshStandardMaterial({
-          vertexColors: true,
-          roughness: 1,
-          metalness: 0,
-        }),
-      );
-      terrain.receiveShadow = true;
-      terrain.castShadow = true;
+      const terrainSettings: TerrainSettings = {
+        size: 30,
+        segments: 10,
+        maxLevel: 3,
+        splitDistance: 1.2,
+        skirtDepth: 0.5,
+      };
+      const terrainGroup = new THREE.Group();
+      const boundsGroup = new THREE.Group();
+      const terrainGeometryCache = new Map<string, THREE.BufferGeometry>();
+      const terrainMaterial = new THREE.MeshStandardMaterial({
+        vertexColors: true,
+        roughness: 0.98,
+        metalness: 0.02,
+        side: THREE.DoubleSide,
+      });
+      let wireframeEnabled = false;
+      const staticWireframeOverlays: MeshWireframeOverlay[] = [];
+      const patchWireframeOverlays: MeshWireframeOverlay[] = [];
 
       const water = new THREE.Mesh(
-        new THREE.CircleGeometry(4.8, 64),
+        new THREE.CircleGeometry(6.8, 96),
         new THREE.MeshStandardMaterial({
           color: "#1b5a8d",
           transparent: true,
-          opacity: 0.72,
+          opacity: 0.76,
           roughness: 0.18,
-          metalness: 0.2,
+          metalness: 0.24,
+          emissive: "#13385e",
+          emissiveIntensity: 0.4,
         }),
       );
       water.rotation.x = -Math.PI / 2;
-      water.position.y = -0.12;
+      water.position.y = -0.24;
+      water.userData.skipGlobalWireframe = true;
+      water.receiveShadow = true;
 
-      const beacon = new THREE.Mesh(
-        new THREE.SphereGeometry(0.2, 20, 20),
-        new THREE.MeshBasicMaterial({ color: "#ffd88d" }),
+      const shoreline = new THREE.Mesh(
+        new THREE.TorusGeometry(6.95, 0.12, 16, 96),
+        new THREE.MeshStandardMaterial({
+          color: "#d7dcb4",
+          roughness: 0.92,
+          metalness: 0.03,
+        }),
       );
-      beacon.position.set(2.2, 1.55, 1.4);
+      shoreline.rotation.x = Math.PI / 2;
+      shoreline.position.y = -0.21;
+      shoreline.userData.skipGlobalWireframe = true;
 
-      scene.add(terrain, water, beacon);
+      const drone = new THREE.Mesh(
+        new THREE.OctahedronGeometry(0.26, 1),
+        new THREE.MeshStandardMaterial({
+          color: "#ffd88d",
+          emissive: "#ffb95d",
+          emissiveIntensity: 0.4,
+          roughness: 0.34,
+          metalness: 0.16,
+        }),
+      );
+      drone.castShadow = true;
+      drone.userData.skipGlobalWireframe = true;
+      drone.position.set(2.6, 2.1, 1.6);
+
+      const droneTrail = createOrbitLine(3.5, "#5dd1ff");
+      droneTrail.position.y = 0.04;
+
+      for (const mesh of [water, shoreline, drone]) {
+        const overlay = createMeshWireframeOverlay(mesh);
+        if (overlay) {
+          staticWireframeOverlays.push(overlay);
+        }
+      }
+
+      scene.add(hemi, sun, terrainGroup, boundsGroup, water, shoreline, drone, droneTrail);
+
+      const terrainState = {
+        maxLevel: terrainSettings.maxLevel,
+        splitDistance: terrainSettings.splitDistance,
+        skirtDepth: terrainSettings.skirtDepth,
+        showBounds: false,
+        freezeLod: false,
+        patches: 0,
+      };
+      const getLodFocus = () => (controls.enabled ? controls.target : camera.position);
+      const initialLodFocus = getLodFocus();
+      let lastRebuildX = initialLodFocus.x;
+      let lastRebuildZ = initialLodFocus.z;
+
+      const clearPatchWireframes = () => {
+        for (const overlay of patchWireframeOverlays) {
+          overlay.dispose();
+        }
+        patchWireframeOverlays.length = 0;
+      };
+
+      const syncPatchWireframes = () => {
+        clearPatchWireframes();
+
+        if (!wireframeEnabled) {
+          return;
+        }
+
+        for (const object of terrainGroup.children) {
+          if (!(object instanceof THREE.Mesh)) {
+            continue;
+          }
+
+          const overlay = createMeshWireframeOverlay(object);
+          if (overlay) {
+            overlay.setVisible(true);
+            patchWireframeOverlays.push(overlay);
+          }
+        }
+      };
+
+      const clearDynamicTerrain = () => {
+        clearPatchWireframes();
+        disposeSceneResources([...boundsGroup.children]);
+        terrainGroup.clear();
+        boundsGroup.clear();
+      };
+
+      const clearTerrainCache = () => {
+        for (const geometry of terrainGeometryCache.values()) {
+          geometry.dispose();
+        }
+
+        terrainGeometryCache.clear();
+      };
+
+      const rebuildTerrain = () => {
+        terrainSettings.maxLevel = terrainState.maxLevel;
+        terrainSettings.splitDistance = terrainState.splitDistance;
+        terrainSettings.skirtDepth = terrainState.skirtDepth;
+        clearDynamicTerrain();
+
+        const lodFocus = getLodFocus();
+        const leaves = buildTerrainLeaves(lodFocus, terrainSettings);
+        terrainState.patches = leaves.length;
+
+        for (const leaf of leaves) {
+          const seamKey = `${Number(leaf.seams.north)}${Number(leaf.seams.south)}${Number(leaf.seams.east)}${Number(leaf.seams.west)}`;
+          const geometryKey = [
+            terrainSettings.segments,
+            terrainSettings.skirtDepth.toFixed(2),
+            leaf.minX,
+            leaf.maxX,
+            leaf.minZ,
+            leaf.maxZ,
+            seamKey,
+          ].join("|");
+          let geometry = terrainGeometryCache.get(geometryKey);
+
+          if (!geometry) {
+            geometry = createTerrainPatchGeometry(simplex, leaf, terrainSettings);
+            terrainGeometryCache.set(geometryKey, geometry);
+          }
+
+          const patch = new THREE.Mesh(geometry, terrainMaterial);
+          patch.castShadow = false;
+          patch.receiveShadow = true;
+          patch.userData.skipGlobalWireframe = true;
+
+          terrainGroup.add(patch);
+
+          if (terrainState.showBounds) {
+            boundsGroup.add(createTerrainBounds(leaf));
+          }
+        }
+
+        syncPatchWireframes();
+        lastRebuildX = lodFocus.x;
+        lastRebuildZ = lodFocus.z;
+      };
+
+      rebuildTerrain();
 
       return {
-        update: (elapsed) => {
-          beacon.position.x = Math.cos(elapsed * 0.55) * 2.8;
-          beacon.position.z = Math.sin(elapsed * 0.55) * 2.8;
-          beacon.position.y = 1.2 + Math.sin(elapsed * 1.8) * 0.18;
+        update: (elapsed, delta) => {
+          drone.position.x = Math.cos(elapsed * 0.46) * 3.4;
+          drone.position.z = Math.sin(elapsed * 0.46) * 3.4;
+          drone.position.y = 1.55 + Math.sin(elapsed * 1.6) * 0.44;
+          drone.rotation.y = elapsed * 1.3;
           sun.position.x = Math.cos(elapsed * 0.16) * 8;
           sun.position.z = Math.sin(elapsed * 0.16) * 8;
+
+          if (terrainState.freezeLod) {
+            return;
+          }
+
+          const lodFocus = getLodFocus();
+          const moved = Math.hypot(lodFocus.x - lastRebuildX, lodFocus.z - lastRebuildZ);
+
+          if (moved > 1.35) {
+            rebuildTerrain();
+          }
+        },
+        setWireframe: (enabled) => {
+          wireframeEnabled = enabled;
+
+          for (const overlay of staticWireframeOverlays) {
+            overlay.setVisible(enabled);
+          }
+
+          syncPatchWireframes();
+        },
+        setupGui: ({ gui }) => {
+          const folder = gui.addFolder("Terrain");
+          folder
+            .add(terrainState, "maxLevel", 2, 5, 1)
+            .name("max lod")
+            .onChange(() => {
+              rebuildTerrain();
+            });
+          folder
+            .add(terrainState, "splitDistance", 0.75, 2.3, 0.05)
+            .name("split radius")
+            .onChange(() => {
+              rebuildTerrain();
+            });
+          folder
+            .add(terrainState, "skirtDepth", 0.2, 1.6, 0.05)
+            .name("seam depth")
+            .onChange(() => {
+              clearTerrainCache();
+              rebuildTerrain();
+            });
+          folder
+            .add(terrainState, "showBounds")
+            .name("patch bounds")
+            .onChange(() => {
+              rebuildTerrain();
+            });
+          folder.add(terrainState, "freezeLod").name("freeze lod");
+          folder.add(terrainState, "patches").name("patches").listen();
         },
         dispose: () => {
-          geometry.dispose();
-          (terrain.material as THREE.Material).dispose();
+          for (const overlay of staticWireframeOverlays) {
+            overlay.dispose();
+          }
+          clearDynamicTerrain();
+          clearTerrainCache();
+          terrainMaterial.dispose();
           water.geometry.dispose();
           (water.material as THREE.Material).dispose();
-          beacon.geometry.dispose();
-          (beacon.material as THREE.Material).dispose();
+          shoreline.geometry.dispose();
+          (shoreline.material as THREE.Material).dispose();
+          drone.geometry.dispose();
+          (drone.material as THREE.Material).dispose();
+          disposeSceneResources([droneTrail]);
         },
       };
     },
@@ -1486,20 +3553,21 @@ const examples: ExampleDefinition[] = [
     cameraPosition: [7.2, 4.8, 8.8],
     target: [0, 2.1, -0.6],
     create: ({ scene, renderer, camera }) => {
-      scene.background = new THREE.Color("#040914");
+      scene.background = new THREE.Color("#091425");
 
-      const ambient = new THREE.AmbientLight("#7ea8ff", 0.3);
-      const key = new THREE.PointLight("#8ff2ff", 26, 18, 2);
+      const ambient = new THREE.AmbientLight("#a6c7ff", 0.56);
+      const sky = new THREE.HemisphereLight("#7dc6ff", "#081018", 0.72);
+      const key = new THREE.PointLight("#8ff2ff", 32, 18, 2);
       key.position.set(0, 3.4, 2.4);
-      const rim = new THREE.DirectionalLight("#ffd7a2", 1.3);
+      const rim = new THREE.DirectionalLight("#ffd7a2", 1.6);
       rim.position.set(-4, 6, -3);
-      scene.add(ambient, key, rim);
+      scene.add(ambient, sky, key, rim);
 
       const floor = new THREE.Mesh(
         new THREE.CircleGeometry(8.8, 72),
         new THREE.MeshStandardMaterial({
-          color: "#071520",
-          roughness: 0.98,
+          color: "#15283a",
+          roughness: 0.94,
           metalness: 0.03,
         }),
       );
@@ -1512,8 +3580,8 @@ const examples: ExampleDefinition[] = [
         new THREE.MeshStandardMaterial({
           color: "#9adfff",
           emissive: "#2c8aff",
-          emissiveIntensity: 0.9,
-          roughness: 0.24,
+          emissiveIntensity: 1.2,
+          roughness: 0.2,
           metalness: 0.42,
         }),
       );
@@ -1522,10 +3590,10 @@ const examples: ExampleDefinition[] = [
 
       const textureSize = 256;
       const portalTexture = new THREE.StorageTexture(textureSize, textureSize);
-      portalTexture.colorSpace = THREE.SRGBColorSpace;
+      portalTexture.colorSpace = THREE.NoColorSpace;
 
       const displayTarget = new THREE.RenderTarget(textureSize, textureSize, {
-        colorSpace: THREE.SRGBColorSpace,
+        colorSpace: THREE.NoColorSpace,
         depthBuffer: false,
         stencilBuffer: false,
         generateMipmaps: false,
@@ -1540,43 +3608,69 @@ const examples: ExampleDefinition[] = [
         const indexUV = uvec2(px, py);
         const nx = px.toFloat().div(textureSize).mul(2).sub(1);
         const ny = py.toFloat().div(textureSize).mul(2).sub(1);
+        const radial = nx.mul(nx).add(ny.mul(ny));
         const spiral = sin(nx.mul(nx).add(ny.mul(ny)).mul(20).sub(time.mul(2.8)));
         const bands = sin(nx.mul(12).add(time.mul(1.4)).add(cos(ny.mul(7).sub(time.mul(0.85)))));
         const plasma = sin(ny.mul(14).sub(time.mul(1.9)).add(cos(nx.mul(6).add(time.mul(1.1)))));
-        const energy = spiral.add(bands).add(plasma).mul(0.18).add(0.5).clamp();
+        const portalCore = radial.mul(-0.88).add(1.05).clamp();
+        const energy = spiral.add(bands).add(plasma).mul(0.2).add(0.8).add(portalCore.mul(0.16)).clamp();
         const sparks = sin(time.mul(0.9).add(nx.mul(15).sub(ny.mul(11)))).mul(0.5).add(0.5).mul(energy);
-        const baseColor = mix(color("#071224"), color("#22d8ff"), energy);
-        const finalColor = mix(baseColor, color("#ffd369"), sparks);
+        const baseColor = mix(color("#1b4f7b"), color("#65f0ff"), energy).add(color("#0f2841").mul(portalCore.mul(0.58).add(0.22)));
+        const finalColor = mix(baseColor, color("#fff0b3"), sparks.mul(0.64).add(0.12));
 
         textureStore(portalTexture, indexUV, vec4(finalColor, 1));
       })().compute(textureSize * textureSize, [64]);
+
+      const portalBack = new THREE.Mesh(
+        new THREE.PlaneGeometry(5.45, 5.45, 1, 1),
+        new THREE.MeshBasicMaterial({
+          color: "#1b5cb8",
+          transparent: true,
+          opacity: 0.18,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+          toneMapped: false,
+        }),
+      );
+      portalBack.position.set(0, 2.3, -1.28);
+      portalBack.rotation.x = 0.15;
 
       const portal = new THREE.Mesh(
         new THREE.PlaneGeometry(5.1, 5.1, 1, 1),
         new THREE.MeshBasicMaterial({
           map: sampledTexture,
+          color: "#ffffff",
           side: THREE.DoubleSide,
+          transparent: true,
+          opacity: 0.98,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
           toneMapped: false,
         }),
       );
       portal.position.set(0, 2.3, -1.2);
       portal.rotation.x = 0.15;
+      portal.renderOrder = 1;
 
       const orb = new THREE.Mesh(
         new THREE.SphereGeometry(1.15, 64, 64),
-        new THREE.MeshStandardMaterial({
+        new THREE.MeshPhysicalMaterial({
+          color: "#ffffff",
           map: sampledTexture,
-          emissive: new THREE.Color("#1f4f8f"),
+          emissive: new THREE.Color("#2e6fb8"),
           emissiveMap: sampledTexture,
-          emissiveIntensity: 0.65,
+          emissiveIntensity: 1.35,
           roughness: 0.16,
           metalness: 0.08,
+          clearcoat: 0.45,
+          clearcoatRoughness: 0.18,
         }),
       );
       orb.position.set(0, 1.25, 1.2);
       orb.castShadow = true;
+      orb.receiveShadow = true;
 
-      scene.add(portal, ring, orb);
+      scene.add(portalBack, portal, ring, orb);
 
       return {
         update: (elapsed) => {
@@ -1585,6 +3679,8 @@ const examples: ExampleDefinition[] = [
           ring.rotation.z = elapsed * 0.16;
           orb.rotation.y = elapsed * 0.28;
           orb.rotation.x = Math.sin(elapsed * 0.7) * 0.18;
+          portalBack.lookAt(camera.position);
+          portalBack.rotateY(Math.PI);
           portal.lookAt(camera.position);
           portal.rotateY(Math.PI);
         },
@@ -1596,6 +3692,8 @@ const examples: ExampleDefinition[] = [
           (floor.material as THREE.Material).dispose();
           ring.geometry.dispose();
           (ring.material as THREE.Material).dispose();
+          portalBack.geometry.dispose();
+          (portalBack.material as THREE.Material).dispose();
           portal.geometry.dispose();
           (portal.material as THREE.Material).dispose();
           orb.geometry.dispose();
@@ -1616,11 +3714,13 @@ app.innerHTML = `
         up through indexed geometry, UVs, lighting, hierarchy, instancing, storage buffers, compute-driven animation,
         particles, morph targets, spline geometry, node-based shaders, animated surfaces, skinning, procedural terrain,
         and then into a run of advanced GPU labs focused on workgroups, compute-authored geometry, and storage textures.
+        Every card now carries an embedded IMGUI so you can flip wireframes, switch between orbit and FPS camera modes,
+        and then dig into example-specific controls without leaving the scene.
       </p>
       <div class="hero-grid">
         <div class="hero-panel">
           <strong>How to use it</strong>
-          <p>Drag to orbit, scroll to zoom, and pan with right mouse. Compare how each scene adds one new idea.</p>
+          <p>Drag to orbit, scroll to zoom, pan with right mouse, or switch to FPS and move with WASD plus Q/E vertical motion.</p>
         </div>
         <div class="hero-panel">
           <strong>Why this progression</strong>
@@ -1635,7 +3735,9 @@ app.innerHTML = `
     </section>
     <section id="examples" class="examples-grid"></section>
     <p class="footer-note">
-      Tip: the storage-buffer, compute-swarm, workgroup-prism, compute-heightfield, and storage-texture portal cards are the most WebGPU-specific steps before jumping into custom WGSL, GPGPU, or renderer internals.
+      Tip: start by toggling wireframe and swapping between orbit and FPS in each IMGUI. The storage-buffer,
+      compute-swarm, workgroup-prism, compute-heightfield, and storage-texture portal cards are the most
+      WebGPU-specific steps before jumping into custom WGSL, GPGPU, or renderer internals.
     </p>
   </main>
 `;
@@ -1669,7 +3771,12 @@ for (const example of examples) {
       ${isAdvancedLab ? `<div class="advanced-chip">GPU Lab</div>` : ""}
     </div>
     <p class="example-summary">${example.summary}</p>
-    <div class="example-viewport"></div>
+    <div class="example-viewport">
+      <div class="example-fps">0 FPS</div>
+    </div>
+    <div class="example-gui-shell">
+      <div class="example-gui"></div>
+    </div>
     <div class="example-notes">
       <p>${example.notes}</p>
       <div class="tag-row">
@@ -1692,6 +3799,7 @@ const renderLoop = () => {
   timer.update();
   const delta = timer.getDelta();
   const elapsed = timer.getElapsed();
+  const fps = delta > 0 ? THREE.MathUtils.clamp(1 / delta, 0, 240) : 0;
 
   for (const mounted of mountedExamples) {
     if (mounted.failed) {
@@ -1699,8 +3807,10 @@ const renderLoop = () => {
     }
 
     try {
-    mounted.controls.update();
-    mounted.update?.(elapsed, delta);
+      mounted.fpsSmoothed = mounted.fpsSmoothed === 0 ? fps : THREE.MathUtils.lerp(mounted.fpsSmoothed, fps, 0.16);
+      mounted.fpsLabel.textContent = `${Math.round(mounted.fpsSmoothed)} FPS`;
+      mounted.cameraRig.update(delta);
+      mounted.update?.(elapsed, delta);
 
       const rect = mounted.host.getBoundingClientRect();
       const visible = rect.bottom > 0 && rect.top < window.innerHeight;
@@ -1726,7 +3836,9 @@ if (import.meta.hot) {
   import.meta.hot.dispose(() => {
     for (const mounted of mountedExamples) {
       mounted.resizeObserver.disconnect();
+      mounted.cameraRig.dispose();
       mounted.controls.dispose();
+      mounted.gui.destroy();
       mounted.dispose?.();
       mounted.renderer.dispose();
     }
@@ -1735,8 +3847,10 @@ if (import.meta.hot) {
 
 async function mountExample(card: HTMLElement, example: ExampleDefinition): Promise<MountedExample> {
   const host = card.querySelector<HTMLDivElement>(".example-viewport");
+  const guiHost = card.querySelector<HTMLDivElement>(".example-gui");
+  const fpsLabel = host?.querySelector<HTMLDivElement>(".example-fps");
 
-  if (!host) {
+  if (!host || !guiHost || !fpsLabel) {
     throw new Error(`Missing viewport for ${example.title}`);
   }
 
@@ -1774,6 +3888,42 @@ async function mountExample(card: HTMLElement, example: ExampleDefinition): Prom
   controls.update();
 
   const runtime = example.create({ scene, camera, renderer, controls });
+  const viewState: ExampleViewState = {
+    wireframe: false,
+    cameraMode: "orbit",
+    moveSpeed: 6,
+    lookSpeed: 1,
+  };
+  const cameraRig = new ExampleCameraRig(camera, controls, renderer.domElement, viewState);
+  const gui = new GUI({
+    autoPlace: false,
+    container: guiHost,
+    title: "Debug",
+    width: 284,
+  });
+  const setWireframe = (enabled: boolean) => {
+    setSceneWireframe(scene, enabled);
+    runtime.setWireframe?.(enabled);
+  };
+  const viewFolder = gui.addFolder("View");
+  viewFolder.add(viewState, "wireframe").name("wireframe").onChange(setWireframe);
+  viewFolder
+    .add(viewState, "cameraMode", { Orbit: "orbit", FPS: "fps" })
+    .name("camera")
+    .onChange((value: CameraMode) => cameraRig.setMode(value));
+  viewFolder.add(viewState, "moveSpeed", 1, 22, 0.25).name("move speed");
+  viewFolder.add(viewState, "lookSpeed", 0.35, 2.4, 0.05).name("look speed");
+  runtime.setupGui?.({
+    gui,
+    scene,
+    camera,
+    renderer,
+    controls,
+    cameraRig,
+    viewState,
+    setWireframe,
+  });
+  setWireframe(viewState.wireframe);
 
   const resize = () => {
     const width = Math.max(host.clientWidth, 1);
@@ -1795,6 +3945,10 @@ async function mountExample(card: HTMLElement, example: ExampleDefinition): Prom
     renderer,
     controls,
     resizeObserver,
+    cameraRig,
+    gui,
+    fpsLabel,
+    fpsSmoothed: 0,
     failed: false,
     ...runtime,
   };
