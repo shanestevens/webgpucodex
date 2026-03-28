@@ -3039,7 +3039,7 @@ const examples: ExampleDefinition[] = [
       };
 
       loader
-        .loadAsync("/models/RobotExpressive.glb")
+        .loadAsync(`${import.meta.env.BASE_URL}models/RobotExpressive.glb`)
         .then((gltf) => {
           if (disposed) {
             disposeCharacter(gltf.scene);
