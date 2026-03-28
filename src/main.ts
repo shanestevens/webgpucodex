@@ -75,6 +75,9 @@ type MountedExample = ExampleRuntime & {
   syncSize: () => void;
 };
 
+const FALLBACK_RENDERER_BUDGET = 4;
+const FALLBACK_PREWARM_MARGIN = 420;
+
 const app = document.querySelector<HTMLDivElement>("#app");
 
 if (!app) {
@@ -6309,16 +6312,17 @@ app.innerHTML = `
 
 const statusTarget = document.querySelector<HTMLDivElement>("#runtime-status");
 const examplesTarget = document.querySelector<HTMLDivElement>("#examples");
+const hasNativeWebGPU = WebGPU.isAvailable();
 
 if (!statusTarget || !examplesTarget) {
   throw new Error("Could not find page targets");
 }
 
-if (!WebGPU.isAvailable()) {
+if (!hasNativeWebGPU) {
   const warning = document.createElement("div");
   warning.className = "status-banner";
   warning.textContent =
-    "WebGPU is not available in this browser right now. Three.js will attempt to fall back to WebGL2 so you can still explore the examples.";
+    "WebGPU is not available in this browser right now. Three.js is falling back to WebGL2, so this page now mounts only a few nearby live scenes at once to avoid mobile context limits.";
   statusTarget.append(warning);
 }
 
@@ -6352,13 +6356,103 @@ for (const example of examples) {
   examplesTarget.append(card);
 }
 
+const exampleCards = [...document.querySelectorAll<HTMLElement>(".example-card")];
+
 const timer = new THREE.Timer();
 timer.connect(document);
-const mountedExamples = await Promise.all(
-  [...document.querySelectorAll<HTMLElement>(".example-card")].map((card, index) =>
-    mountExample(card, examples[index]),
-  ),
-);
+const mountedExamples: Array<MountedExample | null> = hasNativeWebGPU
+  ? await Promise.all(exampleCards.map((card, index) => mountExample(card, examples[index])))
+  : new Array(exampleCards.length).fill(null);
+const mountingExamples = new Map<number, Promise<void>>();
+
+const disposeMountedExample = (mounted: MountedExample) => {
+  window.removeEventListener("resize", mounted.handleWindowResize);
+  mounted.guiFieldObserver.disconnect();
+  mounted.cameraRig.dispose();
+  mounted.controls.dispose();
+  mounted.wireframeController.dispose();
+  mounted.gui.destroy();
+  mounted.dispose?.();
+  mounted.renderer.domElement.remove();
+  mounted.renderer.dispose();
+  mounted.fpsLabel.textContent = "0 FPS";
+};
+
+const ensureExampleMounted = async (index: number) => {
+  if (mountedExamples[index] || mountingExamples.has(index)) {
+    return;
+  }
+
+  const promise = mountExample(exampleCards[index], examples[index])
+    .then((mounted) => {
+      mountedExamples[index] = mounted;
+    })
+    .catch((error) => {
+      const card = exampleCards[index];
+      const host = card.querySelector<HTMLDivElement>(".example-viewport");
+
+      if (host) {
+        card.dataset.error = "true";
+        const details = error instanceof Error ? error.message : String(error);
+        host.innerHTML = `<div class="example-error">This example hit a runtime error.<br>${details}</div>`;
+      }
+
+      console.error(`Example "${examples[index].title}" failed to mount`, error);
+    })
+    .finally(() => {
+      mountingExamples.delete(index);
+    });
+
+  mountingExamples.set(index, promise);
+  await promise;
+};
+
+const unmountExample = (index: number) => {
+  const mounted = mountedExamples[index];
+
+  if (!mounted) {
+    return;
+  }
+
+  disposeMountedExample(mounted);
+  mountedExamples[index] = null;
+};
+
+const reconcileFallbackExamples = () => {
+  if (hasNativeWebGPU) {
+    return;
+  }
+
+  const viewportCenter = window.innerHeight * 0.5;
+  const desired = exampleCards
+    .map((card, index) => ({
+      index,
+      rect: card.getBoundingClientRect(),
+    }))
+    .filter(
+      ({ rect }) =>
+        rect.bottom > -FALLBACK_PREWARM_MARGIN && rect.top < window.innerHeight + FALLBACK_PREWARM_MARGIN,
+    )
+    .sort((a, b) => {
+      const aDistance = Math.abs(a.rect.top + a.rect.height * 0.5 - viewportCenter);
+      const bDistance = Math.abs(b.rect.top + b.rect.height * 0.5 - viewportCenter);
+      return aDistance - bDistance;
+    })
+    .slice(0, FALLBACK_RENDERER_BUDGET)
+    .map(({ index }) => index);
+
+  const desiredSet = new Set(desired);
+
+  for (let index = 0; index < mountedExamples.length; index += 1) {
+    if (!desiredSet.has(index)) {
+      unmountExample(index);
+    }
+  }
+
+  for (const index of desired) {
+    void ensureExampleMounted(index);
+  }
+};
 
 let renderLoopActive = true;
 let renderFrameHandle = 0;
@@ -6381,7 +6475,15 @@ const renderLoop = () => {
   const fps = delta > 0 ? THREE.MathUtils.clamp(1 / delta, 0, 240) : 0;
   const scrollSuspended = performance.now() < scrollSuspendUntil;
 
+  if (!scrollSuspended) {
+    reconcileFallbackExamples();
+  }
+
   for (const mounted of mountedExamples) {
+    if (!mounted) {
+      continue;
+    }
+
     if (mounted.failed) {
       continue;
     }
@@ -6428,14 +6530,9 @@ if (import.meta.hot) {
 
     const teardownExamples = () => {
       for (const mounted of mountedExamples) {
-        window.removeEventListener("resize", mounted.handleWindowResize);
-        mounted.guiFieldObserver.disconnect();
-        mounted.cameraRig.dispose();
-        mounted.controls.dispose();
-        mounted.wireframeController.dispose();
-        mounted.gui.destroy();
-        mounted.dispose?.();
-        mounted.renderer.dispose();
+        if (mounted) {
+          disposeMountedExample(mounted);
+        }
       }
     };
 
