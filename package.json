@@ -4,9 +4,9 @@
   "version": "0.0.0",
   "description": "Interactive Three.js WebGPU learning gallery",
   "scripts": {
-    "dev": "pwsh -NoProfile -Command \"$p = if ($env:INIT_CWD) { $env:INIT_CWD } else { (Get-Location).Path }; if ($p.StartsWith('\\\\?\\\\')) { $p = $p.Substring(4) }; Set-Location $p; node ./node_modules/vite/bin/vite.js\"",
-    "build": "pwsh -NoProfile -Command \"$p = if ($env:INIT_CWD) { $env:INIT_CWD } else { (Get-Location).Path }; if ($p.StartsWith('\\\\?\\\\')) { $p = $p.Substring(4) }; Set-Location $p; node ./node_modules/typescript/bin/tsc && node ./node_modules/vite/bin/vite.js build\"",
-    "preview": "pwsh -NoProfile -Command \"$p = if ($env:INIT_CWD) { $env:INIT_CWD } else { (Get-Location).Path }; if ($p.StartsWith('\\\\?\\\\')) { $p = $p.Substring(4) }; Set-Location $p; node ./node_modules/vite/bin/vite.js preview\""
+    "dev": "node ./scripts/run-cli.mjs ./node_modules/vite/bin/vite.js",
+    "build": "node ./scripts/run-cli.mjs ./node_modules/typescript/bin/tsc --next ./node_modules/vite/bin/vite.js build",
+    "preview": "node ./scripts/run-cli.mjs ./node_modules/vite/bin/vite.js preview"
   },
   "keywords": [
     "threejs",
