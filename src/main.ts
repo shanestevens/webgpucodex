@@ -62,8 +62,10 @@ type MountedExample = ExampleRuntime & {
   renderer: THREE.WebGPURenderer;
   controls: OrbitControls;
   resizeObserver: ResizeObserver;
+  guiFieldObserver: MutationObserver;
   cameraRig: ExampleCameraRig;
   gui: GUI;
+  wireframeController: ReturnType<typeof createSceneWireframeController>;
   fpsLabel: HTMLDivElement;
   fpsSmoothed: number;
   failed: boolean;
@@ -203,38 +205,6 @@ function createOrbitLine(radius: number, colorValue: string): THREE.Line {
   });
 
   return new THREE.Line(geometry, material);
-}
-
-function isWireframeCapable(material: THREE.Material): material is THREE.Material & { wireframe: boolean } {
-  return "wireframe" in material;
-}
-
-function setSceneWireframe(root: THREE.Object3D, enabled: boolean): void {
-  root.traverse((object) => {
-    if ((object.userData as { skipGlobalWireframe?: boolean }).skipGlobalWireframe) {
-      return;
-    }
-
-    if (!("material" in object)) {
-      return;
-    }
-
-    const material = object.material;
-
-    if (Array.isArray(material)) {
-      for (const item of material) {
-        if (isWireframeCapable(item)) {
-          item.wireframe = enabled;
-        }
-      }
-
-      return;
-    }
-
-    if (material instanceof THREE.Material && isWireframeCapable(material)) {
-      material.wireframe = enabled;
-    }
-  });
 }
 
 type SkinnedWireframeOverlay = {
@@ -382,6 +352,125 @@ function createSkinnedWireframeOverlay(sourceMesh: THREE.SkinnedMesh): SkinnedWi
       lineMaterial.dispose();
     },
   };
+}
+
+function createSceneWireframeController(root: THREE.Object3D) {
+  const meshOverlays = new Map<THREE.Mesh, MeshWireframeOverlay>();
+  const skinnedOverlays = new Map<THREE.SkinnedMesh, SkinnedWireframeOverlay>();
+  let enabled = false;
+
+  const sync = () => {
+    root.traverse((object) => {
+      if ((object.userData as { skipGlobalWireframe?: boolean }).skipGlobalWireframe) {
+        return;
+      }
+
+      if ((object as THREE.Object3D & { isSkinnedMesh?: boolean }).isSkinnedMesh) {
+        const skinnedMesh = object as THREE.SkinnedMesh;
+
+        if (!skinnedOverlays.has(skinnedMesh)) {
+          const overlay = createSkinnedWireframeOverlay(skinnedMesh);
+
+          if (overlay) {
+            overlay.setVisible(enabled);
+            skinnedOverlays.set(skinnedMesh, overlay);
+          }
+        }
+
+        return;
+      }
+
+      if (!(object instanceof THREE.Mesh)) {
+        return;
+      }
+
+      if (!meshOverlays.has(object)) {
+        const overlay = createMeshWireframeOverlay(object);
+
+        if (overlay) {
+          overlay.setVisible(enabled);
+          meshOverlays.set(object, overlay);
+        }
+      }
+    });
+  };
+
+  return {
+    setEnabled: (nextEnabled: boolean) => {
+      enabled = nextEnabled;
+      sync();
+
+      for (const overlay of meshOverlays.values()) {
+        overlay.setVisible(enabled);
+      }
+
+      for (const overlay of skinnedOverlays.values()) {
+        overlay.setVisible(enabled);
+      }
+    },
+    update: () => {
+      if (!enabled) {
+        return;
+      }
+
+      sync();
+
+      for (const overlay of skinnedOverlays.values()) {
+        overlay.update();
+      }
+    },
+    dispose: () => {
+      for (const overlay of meshOverlays.values()) {
+        overlay.dispose();
+      }
+
+      for (const overlay of skinnedOverlays.values()) {
+        overlay.dispose();
+      }
+
+      meshOverlays.clear();
+      skinnedOverlays.clear();
+    },
+  };
+}
+
+function slugifyLabel(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+}
+
+function ensureGuiFieldAttributes(root: HTMLElement, prefix: string): void {
+  const fields = root.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>("input, select, textarea");
+
+  fields.forEach((field, index) => {
+    const identifier = `${prefix}-field-${index + 1}`;
+
+    if (!field.name) {
+      field.name = identifier;
+    }
+
+    if (!field.id) {
+      field.id = identifier;
+    }
+  });
+}
+
+function watchGuiFieldAttributes(root: HTMLElement, prefix: string): MutationObserver {
+  ensureGuiFieldAttributes(root, prefix);
+
+  const observer = new MutationObserver(() => {
+    ensureGuiFieldAttributes(root, prefix);
+  });
+
+  observer.observe(root, {
+    childList: true,
+    subtree: true,
+  });
+
+  return observer;
 }
 
 class ExampleCameraRig {
@@ -2554,6 +2643,7 @@ const examples: ExampleDefinition[] = [
           flatShading: false,
         }),
       );
+      blob.userData.skipGlobalWireframe = true;
       blob.position.y = 0.3;
 
       const shell = new THREE.Mesh(
@@ -2565,6 +2655,8 @@ const examples: ExampleDefinition[] = [
           opacity: 0.16,
         }),
       );
+      shell.userData.skipGlobalWireframe = true;
+      shell.visible = false;
       shell.position.copy(blob.position);
       shell.scale.setScalar(1.01);
 
@@ -2587,6 +2679,9 @@ const examples: ExampleDefinition[] = [
 
           blob.rotation.y = elapsed * 0.4;
           shell.rotation.y = blob.rotation.y;
+        },
+        setWireframe: (enabled) => {
+          shell.visible = enabled;
         },
         dispose: () => {
           geometry.dispose();
@@ -3545,54 +3640,189 @@ const examples: ExampleDefinition[] = [
   },
   {
     step: "Step 18",
-    title: "Storage Texture Portal",
-    summary: "Write an animated texture entirely in compute, then immediately reuse it as live material data in the scene.",
+    title: "Storage Texture Pipeline",
+    summary: "Follow one GPU-authored texture through three clear stages: compute writes it, a GPU copy makes it sampleable, and multiple materials read the same result.",
     notes:
-      "This version uses the real production-shaped pattern: compute writes into a storage texture, then the GPU copies that result into a normal sampled texture for shading. That separation makes the write path and the sample path explicit.",
-    tags: ["StorageTexture", "textureStore", "GPU texture copy"],
-    cameraPosition: [7.2, 4.8, 8.8],
-    target: [0, 2.1, -0.6],
+      "Read this one left-to-right. The monitor is the compute-authored texture, the amber transfer node represents `copyTextureToTexture()`, and the three labeled consumers on the right all sample that same texture with different material models.",
+    tags: ["StorageTexture", "textureStore", "GPU texture copy", "Shared sampled texture"],
+    cameraPosition: [8.8, 4.8, 9.4],
+    target: [0.8, 1.8, -0.2],
     create: ({ scene, renderer, camera }) => {
-      scene.background = new THREE.Color("#091425");
+      scene.background = new THREE.Color("#07111e");
 
-      const ambient = new THREE.AmbientLight("#a6c7ff", 0.56);
-      const sky = new THREE.HemisphereLight("#7dc6ff", "#081018", 0.72);
-      const key = new THREE.PointLight("#8ff2ff", 32, 18, 2);
-      key.position.set(0, 3.4, 2.4);
-      const rim = new THREE.DirectionalLight("#ffd7a2", 1.6);
-      rim.position.set(-4, 6, -3);
-      scene.add(ambient, sky, key, rim);
+      const storageState = {
+        showLabels: true,
+        showFlow: true,
+        spinConsumers: true,
+        textureGain: 1.08,
+      };
 
-      const floor = new THREE.Mesh(
-        new THREE.CircleGeometry(8.8, 72),
+      const labelTextures: THREE.Texture[] = [];
+      const billboardMeshes: THREE.Mesh[] = [];
+
+      const createBillboardLabel = (title: string, subtitle: string, accent: string, width: number, height: number): THREE.Mesh => {
+        const canvas = document.createElement("canvas");
+        canvas.width = 768;
+        canvas.height = 220;
+
+        const context = canvas.getContext("2d");
+
+        if (!context) {
+          throw new Error("Could not create 2D canvas context");
+        }
+
+        context.fillStyle = "rgba(7, 17, 30, 0.88)";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.fillStyle = accent;
+        context.fillRect(0, 0, canvas.width, 18);
+        context.strokeStyle = accent;
+        context.globalAlpha = 0.8;
+        context.lineWidth = 4;
+        context.strokeRect(2, 2, canvas.width - 4, canvas.height - 4);
+        context.globalAlpha = 1;
+        context.fillStyle = accent;
+        context.font = "700 42px Segoe UI, sans-serif";
+        context.fillText(title, 34, 78);
+        context.fillStyle = "#d7ebff";
+        context.font = "500 28px Segoe UI, sans-serif";
+        context.fillText(subtitle, 34, 136);
+
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.colorSpace = THREE.SRGBColorSpace;
+        labelTextures.push(texture);
+
+        const material = new THREE.MeshBasicMaterial({
+          map: texture,
+          transparent: true,
+          depthWrite: false,
+          toneMapped: false,
+        });
+
+        const mesh = new THREE.Mesh(new THREE.PlaneGeometry(width, height), material);
+        mesh.renderOrder = 3;
+        mesh.userData.skipGlobalWireframe = true;
+        billboardMeshes.push(mesh);
+        return mesh;
+      };
+
+      const createTagLabel = (text: string, accent: string, width: number, height: number): THREE.Mesh => {
+        const canvas = document.createElement("canvas");
+        canvas.width = 512;
+        canvas.height = 120;
+
+        const context = canvas.getContext("2d");
+
+        if (!context) {
+          throw new Error("Could not create 2D canvas context");
+        }
+
+        context.fillStyle = "rgba(7, 17, 30, 0.9)";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.strokeStyle = accent;
+        context.globalAlpha = 0.86;
+        context.lineWidth = 4;
+        context.strokeRect(2, 2, canvas.width - 4, canvas.height - 4);
+        context.globalAlpha = 1;
+        context.fillStyle = accent;
+        context.font = "600 30px Segoe UI, sans-serif";
+        context.textAlign = "center";
+        context.fillText(text, canvas.width / 2, 72);
+
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.colorSpace = THREE.SRGBColorSpace;
+        labelTextures.push(texture);
+
+        const material = new THREE.MeshBasicMaterial({
+          map: texture,
+          transparent: true,
+          depthWrite: false,
+          toneMapped: false,
+        });
+
+        const mesh = new THREE.Mesh(new THREE.PlaneGeometry(width, height), material);
+        mesh.renderOrder = 3;
+        mesh.userData.skipGlobalWireframe = true;
+        billboardMeshes.push(mesh);
+        return mesh;
+      };
+
+      const ambient = new THREE.AmbientLight("#8fb7ff", 0.42);
+      const sky = new THREE.HemisphereLight("#63b7ff", "#081018", 0.48);
+      const key = new THREE.SpotLight("#dff7ff", 26, 26, Math.PI / 5.4, 0.34, 1.2);
+      key.position.set(3.4, 7.4, 5.6);
+      key.target.position.set(1.6, 1.2, 0);
+      key.castShadow = true;
+      key.shadow.mapSize.set(1024, 1024);
+      key.shadow.bias = -0.00012;
+      key.shadow.normalBias = 0.09;
+      const rim = new THREE.DirectionalLight("#ffd7a2", 1.1);
+      rim.position.set(-4, 5.5, -4);
+      const fill = new THREE.PointLight("#58d8ff", 8, 12, 2);
+      fill.position.set(-2.2, 2.8, 1.2);
+      scene.add(ambient, sky, key, key.target, rim, fill);
+
+      const stageBase = new THREE.Mesh(
+        new THREE.BoxGeometry(11.4, 0.34, 5.6),
         new THREE.MeshStandardMaterial({
-          color: "#15283a",
-          roughness: 0.94,
-          metalness: 0.03,
+          color: "#091725",
+          roughness: 0.96,
+          metalness: 0.04,
         }),
       );
-      floor.rotation.x = -Math.PI / 2;
-      floor.position.y = -1.3;
-      scene.add(floor);
+      stageBase.position.set(0.45, -0.54, 0.05);
+      stageBase.receiveShadow = true;
 
-      const ring = new THREE.Mesh(
-        new THREE.TorusGeometry(2.55, 0.12, 24, 96),
+      const stageDeck = new THREE.Mesh(
+        new THREE.BoxGeometry(10.9, 0.08, 5.1),
         new THREE.MeshStandardMaterial({
-          color: "#9adfff",
-          emissive: "#2c8aff",
-          emissiveIntensity: 1.2,
-          roughness: 0.2,
-          metalness: 0.42,
+          color: "#122439",
+          roughness: 0.9,
+          metalness: 0.05,
         }),
       );
-      ring.position.set(0, 2.3, -1.2);
-      ring.rotation.x = 0.15;
+      stageDeck.position.set(0.45, -0.31, 0.05);
+      stageDeck.receiveShadow = true;
+
+      const writerPad = new THREE.Mesh(
+        new THREE.BoxGeometry(2.9, 0.08, 2.35),
+        new THREE.MeshStandardMaterial({
+          color: "#14314b",
+          roughness: 0.78,
+          metalness: 0.08,
+        }),
+      );
+      writerPad.position.set(-3.35, -0.23, 0.05);
+      writerPad.receiveShadow = true;
+
+      const copyPad = new THREE.Mesh(
+        new THREE.BoxGeometry(2.15, 0.08, 2.2),
+        new THREE.MeshStandardMaterial({
+          color: "#352211",
+          roughness: 0.82,
+          metalness: 0.1,
+        }),
+      );
+      copyPad.position.set(0.3, -0.23, 0.05);
+      copyPad.receiveShadow = true;
+
+      const readerPad = new THREE.Mesh(
+        new THREE.BoxGeometry(4.35, 0.08, 3.85),
+        new THREE.MeshStandardMaterial({
+          color: "#12263d",
+          roughness: 0.84,
+          metalness: 0.07,
+        }),
+      );
+      readerPad.position.set(3.45, -0.23, 0.05);
+      readerPad.receiveShadow = true;
+
+      scene.add(stageBase, stageDeck, writerPad, copyPad, readerPad);
 
       const textureSize = 256;
-      const portalTexture = new THREE.StorageTexture(textureSize, textureSize);
-      portalTexture.colorSpace = THREE.NoColorSpace;
+      const storageTexture = new THREE.StorageTexture(textureSize, textureSize);
+      storageTexture.colorSpace = THREE.NoColorSpace;
 
-      const displayTarget = new THREE.RenderTarget(textureSize, textureSize, {
+      const sampledTarget = new THREE.RenderTarget(textureSize, textureSize, {
         colorSpace: THREE.NoColorSpace,
         depthBuffer: false,
         stencilBuffer: false,
@@ -3600,7 +3830,7 @@ const examples: ExampleDefinition[] = [
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
       });
-      const sampledTexture = displayTarget.texture;
+      const sampledTexture = sampledTarget.texture;
 
       const computeNode = Fn(() => {
         const px = instanceIndex.mod(textureSize);
@@ -3609,95 +3839,539 @@ const examples: ExampleDefinition[] = [
         const nx = px.toFloat().div(textureSize).mul(2).sub(1);
         const ny = py.toFloat().div(textureSize).mul(2).sub(1);
         const radial = nx.mul(nx).add(ny.mul(ny));
-        const spiral = sin(nx.mul(nx).add(ny.mul(ny)).mul(20).sub(time.mul(2.8)));
-        const bands = sin(nx.mul(12).add(time.mul(1.4)).add(cos(ny.mul(7).sub(time.mul(0.85)))));
-        const plasma = sin(ny.mul(14).sub(time.mul(1.9)).add(cos(nx.mul(6).add(time.mul(1.1)))));
-        const portalCore = radial.mul(-0.88).add(1.05).clamp();
-        const energy = spiral.add(bands).add(plasma).mul(0.2).add(0.8).add(portalCore.mul(0.16)).clamp();
-        const sparks = sin(time.mul(0.9).add(nx.mul(15).sub(ny.mul(11)))).mul(0.5).add(0.5).mul(energy);
-        const baseColor = mix(color("#1b4f7b"), color("#65f0ff"), energy).add(color("#0f2841").mul(portalCore.mul(0.58).add(0.22)));
-        const finalColor = mix(baseColor, color("#fff0b3"), sparks.mul(0.64).add(0.12));
+        const rings = sin(radial.mul(32).sub(time.mul(3.2))).mul(0.5).add(0.5);
+        const stripesX = sin(nx.mul(16).add(time.mul(1.1))).mul(0.5).add(0.5);
+        const stripesY = cos(ny.mul(13).sub(time.mul(0.9))).mul(0.5).add(0.5);
+        const diagonal = sin(nx.mul(7).add(ny.mul(11)).add(time.mul(1.7))).mul(0.5).add(0.5);
+        const fineGrid = sin(nx.mul(24)).mul(sin(ny.mul(24))).mul(0.5).add(0.5);
+        const mask = radial.mul(-0.92).add(1.08).clamp();
+        const coolEnergy = rings.mul(0.42).add(stripesX.mul(0.22)).add(stripesY.mul(0.2)).add(diagonal.mul(0.16)).mul(mask).clamp();
+        const warmEnergy = rings.mul(diagonal).mul(0.68).add(stripesY.mul(0.16)).mul(mask).clamp();
+        const coolColor = mix(color("#07111d"), color("#67d8ff"), coolEnergy.add(fineGrid.mul(0.18)).clamp());
+        const finalColor = mix(coolColor, color("#ffc97d"), warmEnergy.mul(0.9));
 
-        textureStore(portalTexture, indexUV, vec4(finalColor, 1));
+        textureStore(storageTexture, indexUV, vec4(finalColor, 1));
       })().compute(textureSize * textureSize, [64]);
 
-      const portalBack = new THREE.Mesh(
-        new THREE.PlaneGeometry(5.45, 5.45, 1, 1),
-        new THREE.MeshBasicMaterial({
-          color: "#1b5cb8",
-          transparent: true,
-          opacity: 0.18,
-          side: THREE.DoubleSide,
-          depthWrite: false,
-          toneMapped: false,
+      const writerGroup = new THREE.Group();
+      writerGroup.position.set(-3.35, 0, 0.05);
+
+      const writerModule = new THREE.Mesh(
+        new THREE.BoxGeometry(1.95, 0.28, 1.08),
+        new THREE.MeshStandardMaterial({
+          color: "#11263a",
+          roughness: 0.72,
+          metalness: 0.22,
+          emissive: "#0d2030",
+          emissiveIntensity: 0.32,
         }),
       );
-      portalBack.position.set(0, 2.3, -1.28);
-      portalBack.rotation.x = 0.15;
+      writerModule.position.set(0, -0.05, 0.78);
+      writerModule.castShadow = true;
+      writerModule.receiveShadow = true;
 
-      const portal = new THREE.Mesh(
-        new THREE.PlaneGeometry(5.1, 5.1, 1, 1),
+      const monitorStand = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.22, 0.28, 1.55, 28),
+        new THREE.MeshStandardMaterial({
+          color: "#142539",
+          roughness: 0.8,
+          metalness: 0.18,
+        }),
+      );
+      monitorStand.position.y = 0.78;
+      monitorStand.castShadow = true;
+
+      const monitorFrame = new THREE.Mesh(
+        new THREE.BoxGeometry(3.15, 2.18, 0.24),
+        new THREE.MeshStandardMaterial({
+          color: "#173149",
+          roughness: 0.48,
+          metalness: 0.42,
+          emissive: "#0d2440",
+          emissiveIntensity: 0.35,
+        }),
+      );
+      monitorFrame.position.set(0, 2.08, 0.02);
+      monitorFrame.castShadow = true;
+
+      const monitorScreen = new THREE.Mesh(
+        new THREE.PlaneGeometry(2.72, 1.74, 1, 1),
         new THREE.MeshBasicMaterial({
           map: sampledTexture,
           color: "#ffffff",
-          side: THREE.DoubleSide,
+          toneMapped: false,
+        }),
+      );
+      monitorScreen.position.set(0, 2.08, 0.15);
+      monitorScreen.renderOrder = 1;
+      monitorScreen.userData.skipGlobalWireframe = true;
+
+      const monitorGlow = new THREE.Mesh(
+        new THREE.PlaneGeometry(2.98, 1.98, 1, 1),
+        new THREE.MeshBasicMaterial({
+          map: sampledTexture,
+          color: "#7edcff",
           transparent: true,
-          opacity: 0.98,
+          opacity: 0.18,
           blending: THREE.AdditiveBlending,
           depthWrite: false,
           toneMapped: false,
         }),
       );
-      portal.position.set(0, 2.3, -1.2);
-      portal.rotation.x = 0.15;
-      portal.renderOrder = 1;
+      monitorGlow.position.set(0, 2.08, 0.08);
+      monitorGlow.userData.skipGlobalWireframe = true;
 
-      const orb = new THREE.Mesh(
-        new THREE.SphereGeometry(1.15, 64, 64),
-        new THREE.MeshPhysicalMaterial({
-          color: "#ffffff",
-          map: sampledTexture,
-          emissive: new THREE.Color("#2e6fb8"),
-          emissiveMap: sampledTexture,
-          emissiveIntensity: 1.35,
-          roughness: 0.16,
+      writerGroup.add(writerModule, monitorStand, monitorFrame, monitorGlow, monitorScreen);
+
+      const copyGroup = new THREE.Group();
+      copyGroup.position.set(0.3, 0, 0.05);
+
+      const copyPedestal = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.9, 1.02, 0.24, 40),
+        new THREE.MeshStandardMaterial({
+          color: "#32200f",
+          roughness: 0.82,
           metalness: 0.08,
-          clearcoat: 0.45,
-          clearcoatRoughness: 0.18,
         }),
       );
-      orb.position.set(0, 1.25, 1.2);
-      orb.castShadow = true;
-      orb.receiveShadow = true;
+      copyPedestal.position.y = 0.04;
+      copyPedestal.receiveShadow = true;
 
-      scene.add(portalBack, portal, ring, orb);
+      const copyModule = new THREE.Mesh(
+        new THREE.BoxGeometry(1.52, 1.06, 0.96),
+        new THREE.MeshStandardMaterial({
+          color: "#5e3920",
+          roughness: 0.36,
+          metalness: 0.22,
+          emissive: "#9a5c22",
+          emissiveIntensity: 0.36,
+        }),
+      );
+      copyModule.position.set(0, 0.82, 0.04);
+      copyModule.castShadow = true;
+      copyModule.receiveShadow = true;
+
+      const copyPreviewFrame = new THREE.Mesh(
+        new THREE.BoxGeometry(1.08, 0.82, 0.08),
+        new THREE.MeshStandardMaterial({
+          color: "#3a2411",
+          roughness: 0.38,
+          metalness: 0.34,
+          emissive: "#6d441c",
+          emissiveIntensity: 0.28,
+        }),
+      );
+      copyPreviewFrame.position.set(0, 0.92, 0.51);
+      copyPreviewFrame.castShadow = true;
+
+      const copyPreview = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.9, 0.64, 1, 1),
+        new THREE.MeshBasicMaterial({
+          map: sampledTexture,
+          color: "#ffd8a6",
+          toneMapped: false,
+        }),
+      );
+      copyPreview.position.set(0, 0.92, 0.57);
+      copyPreview.renderOrder = 1;
+      copyPreview.userData.skipGlobalWireframe = true;
+
+      copyGroup.add(copyPedestal, copyModule, copyPreviewFrame, copyPreview);
+
+      const distributionNode = new THREE.Mesh(
+        new THREE.SphereGeometry(0.2, 18, 16),
+        new THREE.MeshStandardMaterial({
+          color: "#ffe1af",
+          roughness: 0.24,
+          metalness: 0.18,
+          emissive: "#ff9d3b",
+          emissiveIntensity: 0.58,
+        }),
+      );
+      distributionNode.position.set(1.85, 1.3, 0.06);
+      distributionNode.castShadow = true;
+
+      const spherePedestal = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.44, 0.52, 0.28, 28),
+        new THREE.MeshStandardMaterial({
+          color: "#183046",
+          roughness: 0.82,
+          metalness: 0.06,
+        }),
+      );
+      spherePedestal.position.set(2.55, -0.06, 0.86);
+      spherePedestal.receiveShadow = true;
+
+      const sampleSphere = new THREE.Mesh(
+        new THREE.SphereGeometry(0.72, 48, 34),
+        new THREE.MeshPhysicalMaterial({
+          color: "#f9fdff",
+          map: sampledTexture,
+          emissive: new THREE.Color("#1d5c92"),
+          emissiveMap: sampledTexture,
+          emissiveIntensity: 0.58,
+          roughness: 0.18,
+          metalness: 0.08,
+          clearcoat: 0.42,
+          clearcoatRoughness: 0.2,
+        }),
+      );
+      sampleSphere.position.set(2.55, 0.68, 0.86);
+      sampleSphere.castShadow = true;
+      sampleSphere.receiveShadow = true;
+
+      const blockPedestal = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.46, 0.54, 0.28, 28),
+        new THREE.MeshStandardMaterial({
+          color: "#183046",
+          roughness: 0.82,
+          metalness: 0.06,
+        }),
+      );
+      blockPedestal.position.set(4.1, -0.06, 0.08);
+      blockPedestal.receiveShadow = true;
+
+      const sampleBlock = new THREE.Mesh(
+        new THREE.BoxGeometry(1.02, 1.02, 1.02),
+        new THREE.MeshStandardMaterial({
+          color: "#f1e3cb",
+          map: sampledTexture,
+          emissive: "#304c6c",
+          emissiveMap: sampledTexture,
+          emissiveIntensity: 0.24,
+          roughness: 0.56,
+          metalness: 0.05,
+        }),
+      );
+      sampleBlock.position.set(4.1, 0.64, 0.08);
+      sampleBlock.castShadow = true;
+      sampleBlock.receiveShadow = true;
+
+      const cardStand = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.08, 0.1, 1.18, 18),
+        new THREE.MeshStandardMaterial({
+          color: "#183046",
+          roughness: 0.76,
+          metalness: 0.14,
+        }),
+      );
+      cardStand.position.set(3.28, 0.28, -1.08);
+      cardStand.castShadow = true;
+
+      const cardFrame = new THREE.Mesh(
+        new THREE.BoxGeometry(1.48, 1.38, 0.08),
+        new THREE.MeshStandardMaterial({
+          color: "#20354d",
+          roughness: 0.58,
+          metalness: 0.22,
+          emissive: "#17385b",
+          emissiveIntensity: 0.26,
+        }),
+      );
+      cardFrame.position.set(3.28, 1.26, -1.08);
+      cardFrame.castShadow = true;
+
+      const sampleCard = new THREE.Mesh(
+        new THREE.PlaneGeometry(1.24, 1.14, 1, 1),
+        new THREE.MeshBasicMaterial({
+          map: sampledTexture,
+          color: "#ffffff",
+          toneMapped: false,
+        }),
+      );
+      sampleCard.position.set(3.28, 1.26, -1.03);
+      sampleCard.renderOrder = 1;
+      sampleCard.userData.skipGlobalWireframe = true;
+
+      const flowGroup = new THREE.Group();
+      const flowMaterials: THREE.MeshStandardMaterial[] = [];
+      const flowPulseMaterials: THREE.MeshBasicMaterial[] = [];
+      const flowMeshes: THREE.Mesh[] = [];
+      const flowPulses: Array<{
+        curve: THREE.CatmullRomCurve3;
+        mesh: THREE.Mesh;
+        speed: number;
+        offset: number;
+      }> = [];
+
+      const addFlowLink = (
+        points: THREE.Vector3[],
+        radius: number,
+        tubeColor: string,
+        pulseColor: string,
+        speed: number,
+        offset: number,
+      ) => {
+        const curve = new THREE.CatmullRomCurve3(points);
+        const tubeMaterial = new THREE.MeshStandardMaterial({
+          color: tubeColor,
+          emissive: tubeColor,
+          emissiveIntensity: 0.82,
+          roughness: 0.24,
+          metalness: 0.08,
+        });
+        const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 40, radius, 12, false), tubeMaterial);
+        tube.userData.skipGlobalWireframe = true;
+        flowGroup.add(tube);
+        flowMaterials.push(tubeMaterial);
+        flowMeshes.push(tube);
+
+        const pulseMaterial = new THREE.MeshBasicMaterial({
+          color: pulseColor,
+          toneMapped: false,
+        });
+        const pulse = new THREE.Mesh(new THREE.SphereGeometry(radius * 2.4, 14, 12), pulseMaterial);
+        pulse.userData.skipGlobalWireframe = true;
+        flowGroup.add(pulse);
+        flowPulseMaterials.push(pulseMaterial);
+        flowPulses.push({ curve, mesh: pulse, speed, offset });
+      };
+
+      addFlowLink(
+        [
+          new THREE.Vector3(-1.98, 2.08, 0.16),
+          new THREE.Vector3(-1.1, 2.18, 0.28),
+          new THREE.Vector3(-0.28, 1.78, 0.22),
+          new THREE.Vector3(0.02, 1.38, 0.22),
+        ],
+        0.042,
+        "#ffd18a",
+        "#fff1cb",
+        0.16,
+        0.02,
+      );
+      addFlowLink(
+        [
+          new THREE.Vector3(0.62, 1.3, 0.22),
+          new THREE.Vector3(1.05, 1.36, 0.2),
+          new THREE.Vector3(1.42, 1.34, 0.14),
+          new THREE.Vector3(1.85, 1.3, 0.08),
+        ],
+        0.04,
+        "#ffb457",
+        "#fff1cb",
+        0.19,
+        0.24,
+      );
+      addFlowLink(
+        [
+          new THREE.Vector3(1.98, 1.28, 0.08),
+          new THREE.Vector3(2.18, 1.28, 0.34),
+          new THREE.Vector3(2.3, 1.08, 0.58),
+          new THREE.Vector3(2.5, 0.86, 0.82),
+        ],
+        0.03,
+        "#8ddfff",
+        "#dcf7ff",
+        0.22,
+        0.4,
+      );
+      addFlowLink(
+        [
+          new THREE.Vector3(2.02, 1.28, 0.06),
+          new THREE.Vector3(2.6, 1.3, 0.08),
+          new THREE.Vector3(3.34, 1.16, 0.08),
+          new THREE.Vector3(4.0, 0.86, 0.08),
+        ],
+        0.028,
+        "#8ddfff",
+        "#dcf7ff",
+        0.2,
+        0.62,
+      );
+      addFlowLink(
+        [
+          new THREE.Vector3(1.96, 1.28, 0.02),
+          new THREE.Vector3(2.34, 1.58, -0.28),
+          new THREE.Vector3(2.8, 1.58, -0.72),
+          new THREE.Vector3(3.2, 1.34, -1.02),
+        ],
+        0.028,
+        "#8ddfff",
+        "#dcf7ff",
+        0.18,
+        0.78,
+      );
+
+      const writerLabel = createBillboardLabel("1. Compute Authors Pixels", "StorageTexture write pass", "#6ce2ff", 3.2, 0.92);
+      writerLabel.position.set(-3.38, 4.12, 0.26);
+      const copyLabel = createBillboardLabel("2. GPU Copy Makes It Sampleable", "copyTextureToTexture()", "#ffbe68", 3.4, 0.92);
+      copyLabel.position.set(0.32, 3.22, 0.28);
+      const readerLabel = createBillboardLabel("3. Materials Sample The Same Texture", "three consumers, three shading models", "#9ee6c9", 3.45, 0.92);
+      readerLabel.position.set(3.33, 3.55, 0.18);
+
+      const sphereTag = createTagLabel("MeshPhysicalMaterial", "#8ddfff", 1.85, 0.36);
+      sphereTag.position.set(2.55, 1.76, 0.86);
+      const blockTag = createTagLabel("MeshStandardMaterial", "#ffcf8f", 1.85, 0.36);
+      blockTag.position.set(4.1, 1.68, 0.08);
+      const cardTag = createTagLabel("MeshBasicMaterial", "#b8f0d9", 1.7, 0.36);
+      cardTag.position.set(3.28, 2.28, -1.08);
+
+      scene.add(
+        writerGroup,
+        copyGroup,
+        distributionNode,
+        spherePedestal,
+        sampleSphere,
+        blockPedestal,
+        sampleBlock,
+        cardStand,
+        cardFrame,
+        sampleCard,
+        flowGroup,
+        writerLabel,
+        copyLabel,
+        readerLabel,
+        sphereTag,
+        blockTag,
+        cardTag,
+      );
+
+      const monitorMaterials = [
+        monitorScreen.material as THREE.MeshBasicMaterial,
+        monitorGlow.material as THREE.MeshBasicMaterial,
+        copyPreview.material as THREE.MeshBasicMaterial,
+        sampleCard.material as THREE.MeshBasicMaterial,
+      ];
+      const consumerMaterials = [
+        sampleSphere.material as THREE.MeshPhysicalMaterial,
+        sampleBlock.material as THREE.MeshStandardMaterial,
+      ];
+      const pulsePoint = new THREE.Vector3();
+
+      const syncStorage = () => {
+        const gainColor = new THREE.Color().setScalar(storageState.textureGain);
+        const warmGain = new THREE.Color("#ffd8a6").multiplyScalar(0.72 + storageState.textureGain * 0.2);
+
+        for (const label of billboardMeshes) {
+          label.visible = storageState.showLabels;
+        }
+
+        flowGroup.visible = storageState.showFlow;
+        monitorMaterials[0].color.copy(gainColor);
+        monitorMaterials[1].color.set("#74d8ff").multiplyScalar(0.54 + storageState.textureGain * 0.18);
+        monitorMaterials[2].color.copy(warmGain);
+        monitorMaterials[3].color.copy(gainColor);
+        consumerMaterials[0].emissiveIntensity = 0.34 + storageState.textureGain * 0.24;
+        consumerMaterials[1].emissiveIntensity = 0.12 + storageState.textureGain * 0.12;
+
+        for (const material of flowMaterials) {
+          material.emissiveIntensity = 0.52 + storageState.textureGain * 0.28;
+        }
+
+        (distributionNode.material as THREE.MeshStandardMaterial).emissiveIntensity = 0.34 + storageState.textureGain * 0.3;
+        (copyModule.material as THREE.MeshStandardMaterial).emissiveIntensity = 0.2 + storageState.textureGain * 0.18;
+        (copyPreviewFrame.material as THREE.MeshStandardMaterial).emissiveIntensity = 0.16 + storageState.textureGain * 0.14;
+        (cardFrame.material as THREE.MeshStandardMaterial).emissiveIntensity = 0.12 + storageState.textureGain * 0.1;
+      };
+
+      syncStorage();
 
       return {
         update: (elapsed) => {
           renderer.compute(computeNode);
-          renderer.copyTextureToTexture(portalTexture, sampledTexture);
-          ring.rotation.z = elapsed * 0.16;
-          orb.rotation.y = elapsed * 0.28;
-          orb.rotation.x = Math.sin(elapsed * 0.7) * 0.18;
-          portalBack.lookAt(camera.position);
-          portalBack.rotateY(Math.PI);
-          portal.lookAt(camera.position);
-          portal.rotateY(Math.PI);
+          renderer.copyTextureToTexture(storageTexture, sampledTexture);
+
+          if (storageState.spinConsumers) {
+            sampleSphere.rotation.y = elapsed * 0.4;
+            sampleSphere.rotation.x = Math.sin(elapsed * 0.65) * 0.08;
+            sampleBlock.rotation.y = elapsed * 0.28;
+            const cardYaw = -0.38 + Math.sin(elapsed * 0.45) * 0.08;
+            cardFrame.rotation.y = cardYaw;
+            sampleCard.rotation.y = cardYaw;
+          }
+
+          for (const label of billboardMeshes) {
+            label.lookAt(camera.position.x, camera.position.y, camera.position.z);
+            label.rotateY(Math.PI);
+          }
+
+          for (const pulse of flowPulses) {
+            pulse.curve.getPointAt((elapsed * pulse.speed + pulse.offset) % 1, pulsePoint);
+            pulse.mesh.position.copy(pulsePoint);
+            pulse.mesh.scale.setScalar(0.92 + Math.sin(elapsed * 3.4 + pulse.offset * 10) * 0.12);
+          }
+        },
+        setupGui: ({ gui }) => {
+          const folder = gui.addFolder("Pipeline");
+          folder.add(storageState, "showLabels").name("show labels").onChange(syncStorage);
+          folder.add(storageState, "showFlow").name("show flow").onChange(syncStorage);
+          folder.add(storageState, "spinConsumers").name("spin consumers");
+          folder.add(storageState, "textureGain", 0.65, 1.8, 0.01).name("texture gain").onChange(syncStorage);
         },
         dispose: () => {
           computeNode.dispose();
-          portalTexture.dispose();
-          displayTarget.dispose();
-          floor.geometry.dispose();
-          (floor.material as THREE.Material).dispose();
-          ring.geometry.dispose();
-          (ring.material as THREE.Material).dispose();
-          portalBack.geometry.dispose();
-          (portalBack.material as THREE.Material).dispose();
-          portal.geometry.dispose();
-          (portal.material as THREE.Material).dispose();
-          orb.geometry.dispose();
-          (orb.material as THREE.Material).dispose();
+          storageTexture.dispose();
+          sampledTarget.dispose();
+          stageBase.geometry.dispose();
+          (stageBase.material as THREE.Material).dispose();
+          stageDeck.geometry.dispose();
+          (stageDeck.material as THREE.Material).dispose();
+          writerPad.geometry.dispose();
+          (writerPad.material as THREE.Material).dispose();
+          copyPad.geometry.dispose();
+          (copyPad.material as THREE.Material).dispose();
+          readerPad.geometry.dispose();
+          (readerPad.material as THREE.Material).dispose();
+          writerModule.geometry.dispose();
+          (writerModule.material as THREE.Material).dispose();
+          monitorStand.geometry.dispose();
+          (monitorStand.material as THREE.Material).dispose();
+          monitorFrame.geometry.dispose();
+          (monitorFrame.material as THREE.Material).dispose();
+          monitorScreen.geometry.dispose();
+          (monitorScreen.material as THREE.Material).dispose();
+          monitorGlow.geometry.dispose();
+          (monitorGlow.material as THREE.Material).dispose();
+          copyPedestal.geometry.dispose();
+          (copyPedestal.material as THREE.Material).dispose();
+          copyModule.geometry.dispose();
+          (copyModule.material as THREE.Material).dispose();
+          copyPreviewFrame.geometry.dispose();
+          (copyPreviewFrame.material as THREE.Material).dispose();
+          copyPreview.geometry.dispose();
+          (copyPreview.material as THREE.Material).dispose();
+          distributionNode.geometry.dispose();
+          (distributionNode.material as THREE.Material).dispose();
+          spherePedestal.geometry.dispose();
+          (spherePedestal.material as THREE.Material).dispose();
+          sampleSphere.geometry.dispose();
+          (sampleSphere.material as THREE.Material).dispose();
+          blockPedestal.geometry.dispose();
+          (blockPedestal.material as THREE.Material).dispose();
+          sampleBlock.geometry.dispose();
+          (sampleBlock.material as THREE.Material).dispose();
+          cardStand.geometry.dispose();
+          (cardStand.material as THREE.Material).dispose();
+          cardFrame.geometry.dispose();
+          (cardFrame.material as THREE.Material).dispose();
+          sampleCard.geometry.dispose();
+          (sampleCard.material as THREE.Material).dispose();
+
+          for (const mesh of flowMeshes) {
+            mesh.geometry.dispose();
+          }
+
+          for (const material of flowMaterials) {
+            material.dispose();
+          }
+
+          for (const pulse of flowPulses) {
+            pulse.mesh.geometry.dispose();
+          }
+
+          for (const material of flowPulseMaterials) {
+            material.dispose();
+          }
+
+          for (const mesh of billboardMeshes) {
+            mesh.geometry.dispose();
+            (mesh.material as THREE.Material).dispose();
+          }
+
+          for (const texture of labelTextures) {
+            texture.dispose();
+          }
         },
       };
     },
@@ -3736,7 +4410,7 @@ app.innerHTML = `
     <section id="examples" class="examples-grid"></section>
     <p class="footer-note">
       Tip: start by toggling wireframe and swapping between orbit and FPS in each IMGUI. The storage-buffer,
-      compute-swarm, workgroup-prism, compute-heightfield, and storage-texture portal cards are the most
+      compute-swarm, workgroup-prism, compute-heightfield, and storage-texture pipeline cards are the most
       WebGPU-specific steps before jumping into custom WGSL, GPGPU, or renderer internals.
     </p>
   </main>
@@ -3810,6 +4484,7 @@ const renderLoop = () => {
       mounted.fpsSmoothed = mounted.fpsSmoothed === 0 ? fps : THREE.MathUtils.lerp(mounted.fpsSmoothed, fps, 0.16);
       mounted.fpsLabel.textContent = `${Math.round(mounted.fpsSmoothed)} FPS`;
       mounted.cameraRig.update(delta);
+      mounted.wireframeController.update();
       mounted.update?.(elapsed, delta);
 
       const rect = mounted.host.getBoundingClientRect();
@@ -3836,8 +4511,10 @@ if (import.meta.hot) {
   import.meta.hot.dispose(() => {
     for (const mounted of mountedExamples) {
       mounted.resizeObserver.disconnect();
+      mounted.guiFieldObserver.disconnect();
       mounted.cameraRig.dispose();
       mounted.controls.dispose();
+      mounted.wireframeController.dispose();
       mounted.gui.destroy();
       mounted.dispose?.();
       mounted.renderer.dispose();
@@ -3878,6 +4555,12 @@ async function mountExample(card: HTMLElement, example: ExampleDefinition): Prom
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.enablePan = true;
+  controls.zoomToCursor = true;
+  controls.mouseButtons = {
+    LEFT: THREE.MOUSE.ROTATE,
+    MIDDLE: THREE.MOUSE.DOLLY,
+    RIGHT: THREE.MOUSE.PAN,
+  };
   controls.minDistance = 1.5;
   controls.maxDistance = 30;
 
@@ -3895,6 +4578,7 @@ async function mountExample(card: HTMLElement, example: ExampleDefinition): Prom
     lookSpeed: 1,
   };
   const cameraRig = new ExampleCameraRig(camera, controls, renderer.domElement, viewState);
+  const wireframeController = createSceneWireframeController(scene);
   const gui = new GUI({
     autoPlace: false,
     container: guiHost,
@@ -3902,7 +4586,7 @@ async function mountExample(card: HTMLElement, example: ExampleDefinition): Prom
     width: 284,
   });
   const setWireframe = (enabled: boolean) => {
-    setSceneWireframe(scene, enabled);
+    wireframeController.setEnabled(enabled);
     runtime.setWireframe?.(enabled);
   };
   const viewFolder = gui.addFolder("View");
@@ -3923,6 +4607,10 @@ async function mountExample(card: HTMLElement, example: ExampleDefinition): Prom
     viewState,
     setWireframe,
   });
+  const guiFieldObserver = watchGuiFieldAttributes(
+    guiHost,
+    `debug-${slugifyLabel(`${example.step}-${example.title}`)}`,
+  );
   setWireframe(viewState.wireframe);
 
   const resize = () => {
@@ -3945,8 +4633,10 @@ async function mountExample(card: HTMLElement, example: ExampleDefinition): Prom
     renderer,
     controls,
     resizeObserver,
+    guiFieldObserver,
     cameraRig,
     gui,
+    wireframeController,
     fpsLabel,
     fpsSmoothed: 0,
     failed: false,
