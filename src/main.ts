@@ -2277,11 +2277,6 @@ const examples: ExampleDefinition[] = [
       const accentRig = new THREE.Group();
       const accent = new THREE.PointLight("#ffd9b7", studioState.accentIntensity, 18, 2);
       accent.position.set(0, 4.2, 2.6);
-      const accentMarker = new THREE.Mesh(
-        new THREE.SphereGeometry(0.08, 16, 16),
-        new THREE.MeshBasicMaterial({ color: "#fff0d9" }),
-      );
-      accent.add(accentMarker);
       accentRig.add(accent);
 
       scene.add(stage, stageTop, shadowCatcher, shadowFocus, key, shadowSpot, fill, rim, accentRig);
@@ -2362,54 +2357,96 @@ const examples: ExampleDefinition[] = [
         {
           key: "metals",
           materialAt: (column: number) => {
-            const t = column / lastColumn;
+            const variants = [
+              { color: "#d7b676", roughness: 0.08, clearcoat: 0.1, iridescence: 0.04 },
+              { color: "#7ea2c6", roughness: 0.14, clearcoat: 0.08, iridescence: 0.28 },
+              { color: "#d7dce6", roughness: 0.03, clearcoat: 0.06, iridescence: 0.08 },
+              { color: "#a56e52", roughness: 0.18, clearcoat: 0.12, iridescence: 0 },
+              { color: "#353a44", roughness: 0.28, clearcoat: 0.16, iridescence: 0.12 },
+              { color: "#11161f", roughness: 0.06, clearcoat: 0.28, iridescence: 0.34 },
+            ];
+            const variant = variants[column % variants.length];
             return createPhysicalMaterial({
-              color: new THREE.Color().setHSL(0.08 + t * 0.04, 0.26, 0.48),
+              color: variant.color,
               metalness: 1,
-              roughness: 0.06 + t * 0.9,
+              roughness: variant.roughness,
+              clearcoat: variant.clearcoat,
+              clearcoatRoughness: 0.04,
+              iridescence: variant.iridescence,
+              iridescenceIOR: 1.3,
+              iridescenceThicknessRange: [160, 640],
+              specularIntensity: 1,
             });
           },
         },
         {
           key: "dielectrics",
           materialAt: (column: number) => {
-            const palette = ["#7f8ca2", "#9a745d", "#60749c", "#5d6f5d", "#9d9d95", "#845149"];
-            const t = column / lastColumn;
+            const variants = [
+              { color: "#f3f5f7", roughness: 0.08, clearcoat: 0.06, specularIntensity: 0.6 },
+              { color: "#8d705f", roughness: 0.34, clearcoat: 0.18, specularIntensity: 0.72 },
+              { color: "#4e648d", roughness: 0.18, clearcoat: 0.26, specularIntensity: 0.86 },
+              { color: "#5d7d72", roughness: 0.52, clearcoat: 0.12, specularIntensity: 0.48 },
+              { color: "#c5c0b5", roughness: 0.86, clearcoat: 0.02, specularIntensity: 0.3 },
+              { color: "#2f3137", roughness: 0.22, clearcoat: 0.42, specularIntensity: 1.1 },
+            ];
+            const variant = variants[column % variants.length];
             return createPhysicalMaterial({
-              color: palette[column % palette.length],
+              color: variant.color,
               metalness: 0,
-              roughness: 0.1 + t * 0.84,
+              roughness: variant.roughness,
+              clearcoat: variant.clearcoat,
+              clearcoatRoughness: 0.08 + column * 0.03,
+              specularIntensity: variant.specularIntensity,
+              specularColor: new THREE.Color(variant.color).lerp(new THREE.Color("#fff5e8"), 0.4),
             });
           },
         },
         {
           key: "clearcoat",
           materialAt: (column: number) => {
-            const palette = ["#243d7a", "#4f74d8", "#6fa8ff", "#86643f", "#2b6a65", "#8a2f3d"];
-            const t = column / lastColumn;
+            const variants = [
+              { color: "#29458a", baseRoughness: 0.34, coatRoughness: 0.02 },
+              { color: "#5f86f2", baseRoughness: 0.28, coatRoughness: 0.05 },
+              { color: "#7ab8ff", baseRoughness: 0.22, coatRoughness: 0.08 },
+              { color: "#9a7445", baseRoughness: 0.26, coatRoughness: 0.04 },
+              { color: "#2a716a", baseRoughness: 0.3, coatRoughness: 0.06 },
+              { color: "#9b3550", baseRoughness: 0.24, coatRoughness: 0.03 },
+            ];
+            const variant = variants[column % variants.length];
             return createPhysicalMaterial({
-              color: palette[column % palette.length],
-              metalness: 0.08,
-              roughness: 0.35,
+              color: variant.color,
+              metalness: 0.1,
+              roughness: variant.baseRoughness,
               clearcoat: 1,
-              clearcoatRoughness: 0.02 + t * 0.42,
+              clearcoatRoughness: variant.coatRoughness,
+              specularIntensity: 0.98,
+              specularColor: new THREE.Color("#fff2da"),
             });
           },
         },
         {
           key: "sheen",
           materialAt: (column: number) => {
-            const palette = ["#a7bdd7", "#a5cdd6", "#d7bf9f", "#cfbde6", "#add8bf", "#d8aeb0"];
-            const t = column / lastColumn;
+            const variants = [
+              { color: "#bccce6", sheenColor: "#eef6ff", roughness: 0.22, sheen: 0.72 },
+              { color: "#8fc7ce", sheenColor: "#e2fff8", roughness: 0.18, sheen: 0.84 },
+              { color: "#c9b08c", sheenColor: "#fff1d9", roughness: 0.28, sheen: 0.62 },
+              { color: "#b9a4da", sheenColor: "#f2e6ff", roughness: 0.2, sheen: 0.94 },
+              { color: "#95c3a4", sheenColor: "#e6ffe8", roughness: 0.24, sheen: 0.68 },
+              { color: "#d0a2a8", sheenColor: "#ffe2ea", roughness: 0.18, sheen: 0.9 },
+            ];
+            const variant = variants[column % variants.length];
             return createPhysicalMaterial({
-              color: palette[column % palette.length],
-              roughness: 0.18 + t * 0.28,
+              color: variant.color,
+              roughness: variant.roughness,
               metalness: 0,
-              clearcoat: 1,
-              clearcoatRoughness: 0.04 + t * 0.18,
-              sheen: 0.5 + t * 0.35,
-              sheenColor: new THREE.Color(palette[column % palette.length]).lerp(new THREE.Color("#fff4da"), 0.42),
-              sheenRoughness: 0.16 + t * 0.28,
+              clearcoat: 0.24,
+              clearcoatRoughness: 0.08,
+              sheen: variant.sheen,
+              sheenColor: variant.sheenColor,
+              sheenRoughness: 0.28,
+              specularIntensity: 0.82,
             });
           },
         },
@@ -2444,28 +2481,37 @@ const examples: ExampleDefinition[] = [
       const props = new THREE.Group();
       const propMaterials = [
         createPhysicalMaterial({
-          color: "#aebdd8",
+          color: "#d8b56d",
           metalness: 1,
+          roughness: 0.08,
+          clearcoat: 0.08,
+        }),
+        createPhysicalMaterial({
+          color: "#cfd6ef",
+          roughness: 0.08,
+          clearcoat: 1,
+          clearcoatRoughness: 0.03,
+          sheen: 0.42,
+          sheenColor: "#f3f8ff",
+          iridescence: 0.22,
+          iridescenceIOR: 1.22,
+          iridescenceThicknessRange: [120, 420],
+        }),
+        createPhysicalMaterial({
+          color: "#4f7d63",
+          roughness: 0.58,
+          metalness: 0.04,
+          clearcoat: 0.22,
+          sheen: 0.18,
+          sheenColor: "#dff0d6",
+        }),
+        createPhysicalMaterial({
+          color: "#8d5a49",
           roughness: 0.18,
-        }),
-        createPhysicalMaterial({
-          color: "#d6d9e4",
-          roughness: 0.14,
-          clearcoat: 0.8,
-          clearcoatRoughness: 0.05,
-          sheen: 0.35,
-          sheenColor: "#eef5ff",
-        }),
-        createPhysicalMaterial({
-          color: "#627a5f",
-          roughness: 0.74,
-          metalness: 0.02,
-          clearcoat: 0.35,
-        }),
-        createPhysicalMaterial({
-          color: "#927660",
-          roughness: 0.46,
-          metalness: 0.12,
+          metalness: 0.05,
+          clearcoat: 0.9,
+          clearcoatRoughness: 0.04,
+          specularIntensity: 1,
         }),
       ];
 
@@ -2503,7 +2549,6 @@ const examples: ExampleDefinition[] = [
           fill.groundColor.set("#121b28");
           rim.color.set("#c9ddff");
           accent.color.set("#ffc796");
-          (accentMarker.material as THREE.MeshBasicMaterial).color.set("#ffe6c4");
         } else {
           scene.background = new THREE.Color("#c6cdd7");
           scene.fog = new THREE.Fog("#c6cdd7", 18, 34);
@@ -2518,7 +2563,6 @@ const examples: ExampleDefinition[] = [
           fill.groundColor.set("#66758f");
           rim.color.set("#c7d7ff");
           accent.color.set("#ffd9b7");
-          (accentMarker.material as THREE.MeshBasicMaterial).color.set("#fff0d9");
         }
       };
 
@@ -2615,7 +2659,6 @@ const examples: ExampleDefinition[] = [
           stage.geometry.dispose();
           stageTop.geometry.dispose();
           shadowCatcher.geometry.dispose();
-          accentMarker.geometry.dispose();
           disposeSceneResources([shadowFocus]);
 
           for (const material of trackedMaterials) {
@@ -2623,7 +2666,6 @@ const examples: ExampleDefinition[] = [
           }
 
           (shadowCatcher.material as THREE.Material).dispose();
-          (accentMarker.material as THREE.Material).dispose();
         },
       };
     },
@@ -2795,11 +2837,6 @@ const examples: ExampleDefinition[] = [
       const accentRig = new THREE.Group();
       const accent = new THREE.PointLight("#ffd6b0", benchState.accentIntensity, 16, 2);
       accent.position.set(0, 4.2, 2.5);
-      const accentMarker = new THREE.Mesh(
-        registerGeometry(new THREE.SphereGeometry(0.08, 16, 16)),
-        registerMaterial(new THREE.MeshBasicMaterial({ color: "#fff2df" })),
-      );
-      accent.add(accentMarker);
       accentRig.add(accent);
 
       scene.add(stageBase, stageTop, shadowCatcher, backdrop, sideWingLeft, sideWingRight, shadowFocus, key, fill, rim, accentRig);
@@ -2844,13 +2881,15 @@ const examples: ExampleDefinition[] = [
           accent: "#d7c7af",
           position: new THREE.Vector3(-3.9, 0, -1.8),
           materialOverrides: {
-            color: "#efe7de",
-            roughness: 0.18,
-            clearcoat: 0.42,
-            clearcoatRoughness: 0.08,
-            iridescence: 0.38,
-            iridescenceIOR: 1.24,
-            iridescenceThicknessRange: [120, 520],
+            color: "#f3ece3",
+            roughness: 0.12,
+            clearcoat: 0.58,
+            clearcoatRoughness: 0.05,
+            iridescence: 0.26,
+            iridescenceIOR: 1.22,
+            iridescenceThicknessRange: [120, 420],
+            specularIntensity: 0.82,
+            specularColor: "#fff7ee",
           },
         },
         {
@@ -2860,16 +2899,18 @@ const examples: ExampleDefinition[] = [
           accent: "#e2b786",
           position: new THREE.Vector3(0, 0, -1.8),
           materialOverrides: {
-            color: "#ddb57d",
-            roughness: 0.06,
+            color: "#d7a466",
+            roughness: 0.04,
             clearcoat: 1,
-            clearcoatRoughness: 0.03,
-            sheen: 0.28,
+            clearcoatRoughness: 0.02,
+            sheen: 0.34,
             sheenColor: "#fff0c8",
-            sheenRoughness: 0.14,
-            iridescence: 0.24,
-            iridescenceIOR: 1.18,
-            iridescenceThicknessRange: [120, 320],
+            sheenRoughness: 0.12,
+            iridescence: 0.38,
+            iridescenceIOR: 1.22,
+            iridescenceThicknessRange: [140, 420],
+            specularIntensity: 1,
+            specularColor: "#fff0db",
           },
         },
         {
@@ -2879,14 +2920,15 @@ const examples: ExampleDefinition[] = [
           accent: "#6ac7d8",
           position: new THREE.Vector3(3.9, 0, -1.8),
           materialOverrides: {
-            color: "#74c7d7",
-            roughness: 0.18,
+            color: "#4ea2b6",
+            roughness: 0.1,
             metalness: 1,
-            clearcoat: 0.18,
-            clearcoatRoughness: 0.04,
+            clearcoat: 0.42,
+            clearcoatRoughness: 0.03,
             iridescence: 1,
-            iridescenceIOR: 1.3,
-            iridescenceThicknessRange: [180, 720],
+            iridescenceIOR: 1.34,
+            iridescenceThicknessRange: [220, 920],
+            specularIntensity: 1,
           },
         },
         {
@@ -2896,11 +2938,15 @@ const examples: ExampleDefinition[] = [
           accent: "#9cdad0",
           position: new THREE.Vector3(-3.9, 0, 1.95),
           materialOverrides: {
-            color: "#23262c",
-            roughness: 0.08,
+            color: "#12151b",
+            roughness: 0.035,
             metalness: 1,
-            clearcoat: 0.28,
-            clearcoatRoughness: 0.03,
+            clearcoat: 0.44,
+            clearcoatRoughness: 0.02,
+            specularIntensity: 1,
+            iridescence: 0.18,
+            iridescenceIOR: 1.18,
+            iridescenceThicknessRange: [80, 160],
           },
         },
         {
@@ -2910,13 +2956,15 @@ const examples: ExampleDefinition[] = [
           accent: "#e0a562",
           position: new THREE.Vector3(0, 0, 1.95),
           materialOverrides: {
-            color: "#d9a05d",
-            roughness: 0.18,
+            color: "#d08c3f",
+            roughness: 0.12,
             clearcoat: 1,
-            clearcoatRoughness: 0.05,
-            sheen: 0.2,
+            clearcoatRoughness: 0.035,
+            sheen: 0.28,
             sheenColor: "#fff1d6",
-            sheenRoughness: 0.24,
+            sheenRoughness: 0.18,
+            specularIntensity: 0.94,
+            specularColor: "#ffe3b6",
           },
         },
         {
@@ -2926,16 +2974,18 @@ const examples: ExampleDefinition[] = [
           accent: "#ef7f6d",
           position: new THREE.Vector3(3.9, 0, 1.95),
           materialOverrides: {
-            color: "#dd7061",
-            roughness: 0.12,
+            color: "#c94f58",
+            roughness: 0.07,
             clearcoat: 1,
-            clearcoatRoughness: 0.03,
-            sheen: 0.22,
+            clearcoatRoughness: 0.02,
+            sheen: 0.28,
             sheenColor: "#ffd8ce",
-            sheenRoughness: 0.18,
-            iridescence: 0.16,
-            iridescenceIOR: 1.16,
-            iridescenceThicknessRange: [80, 220],
+            sheenRoughness: 0.12,
+            iridescence: 0.32,
+            iridescenceIOR: 1.2,
+            iridescenceThicknessRange: [120, 340],
+            specularIntensity: 1,
+            specularColor: "#ffd7df",
           },
         },
       ];
@@ -3045,7 +3095,6 @@ const examples: ExampleDefinition[] = [
           fill.groundColor.set("#101824");
           rim.color.set("#cadfff");
           accent.color.set("#ffc08a");
-          (accentMarker.material as THREE.MeshBasicMaterial).color.set("#ffe1bc");
         } else {
           scene.background = new THREE.Color("#b8c1cc");
           scene.fog = new THREE.Fog("#b8c1cc", 17, 31);
@@ -3064,7 +3113,6 @@ const examples: ExampleDefinition[] = [
           fill.groundColor.set("#617087");
           rim.color.set("#d9e6ff");
           accent.color.set("#ffd6b0");
-          (accentMarker.material as THREE.MeshBasicMaterial).color.set("#fff2df");
         }
       };
 

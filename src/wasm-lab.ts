@@ -1195,9 +1195,13 @@ function mountPhysicsPreview(
   scene.background = new THREE.Color(0x06100c);
   scene.fog = new THREE.Fog(0x06100c, 10, 28);
 
+  const stageCenterOffset = 2.9;
+  const platformHalfExtent = 2.2;
+  const platformWorldSize = platformHalfExtent * 2;
+
   const camera = new THREE.PerspectiveCamera(36, 1, 0.1, 60);
-  camera.position.set(0, 6.4, 13.6);
-  camera.lookAt(0, 2.3, 0);
+  camera.position.set(0, 5.8, 11.4);
+  camera.lookAt(0, 1.95, 0);
 
   scene.add(new THREE.HemisphereLight(0xd6ffe8, 0x07100c, 0.85));
 
@@ -1232,7 +1236,7 @@ function mountPhysicsPreview(
   scene.add(floor);
 
   const floorRing = new THREE.Mesh(
-    new THREE.TorusGeometry(5.7, 0.08, 18, 96),
+    new THREE.TorusGeometry(4.9, 0.08, 18, 96),
     new THREE.MeshBasicMaterial({
       color: 0x9ef6d9,
       transparent: true,
@@ -1244,25 +1248,25 @@ function mountPhysicsPreview(
   scene.add(floorRing);
 
   const divider = new THREE.Mesh(
-    new THREE.BoxGeometry(0.05, 2.8, 8.2),
+    new THREE.BoxGeometry(0.04, 2.2, 6.4),
     new THREE.MeshBasicMaterial({
       color: 0x6fb7ff,
       transparent: true,
-      opacity: 0.18,
+      opacity: 0.14,
     }),
   );
-  divider.position.set(0, 1.3, 0);
+  divider.position.set(0, 1.15, 0);
   scene.add(divider);
 
   const sideLabelMaterial = new THREE.MeshBasicMaterial({ color: 0x99dbc1, transparent: true, opacity: 0.4 });
   const leftLabel = new THREE.Mesh(new THREE.RingGeometry(2.4, 2.52, 96), sideLabelMaterial);
   leftLabel.rotation.x = -Math.PI / 2;
-  leftLabel.position.set(-4.4, 0.06, 0);
+  leftLabel.position.set(-stageCenterOffset, 0.06, 0);
   scene.add(leftLabel);
 
   const rightLabel = new THREE.Mesh(new THREE.RingGeometry(2.4, 2.52, 96), sideLabelMaterial.clone());
   rightLabel.rotation.x = -Math.PI / 2;
-  rightLabel.position.set(4.4, 0.06, 0);
+  rightLabel.position.set(stageCenterOffset, 0.06, 0);
   scene.add(rightLabel);
 
   const platformMaterial = new THREE.MeshStandardMaterial({
@@ -1270,15 +1274,15 @@ function mountPhysicsPreview(
     roughness: 0.82,
     metalness: 0.08,
   });
-  const platformGeometry = new THREE.BoxGeometry(4.4, 0.28, 4.4);
+  const platformGeometry = new THREE.BoxGeometry(platformWorldSize, 0.28, platformWorldSize);
   const leftPlatform = new THREE.Mesh(platformGeometry, platformMaterial);
-  leftPlatform.position.set(-4.4, 0, 0);
+  leftPlatform.position.set(-stageCenterOffset, 0, 0);
   leftPlatform.receiveShadow = true;
   leftPlatform.castShadow = true;
   scene.add(leftPlatform);
 
   const rightPlatform = new THREE.Mesh(platformGeometry, platformMaterial.clone());
-  rightPlatform.position.set(4.4, 0, 0);
+  rightPlatform.position.set(stageCenterOffset, 0, 0);
   rightPlatform.receiveShadow = true;
   rightPlatform.castShadow = true;
   scene.add(rightPlatform);
@@ -1320,8 +1324,8 @@ function mountPhysicsPreview(
   const gridZ = 3;
   const layers = 6;
   const spacing = 0.56;
-  const leftCenter = -4.4;
-  const rightCenter = 4.4;
+  const leftCenter = -stageCenterOffset;
+  const rightCenter = stageCenterOffset;
   const jsStepHistory: number[] = [];
   const wasmStepHistory: number[] = [];
   const jsBodies = new Array<{
@@ -2283,6 +2287,41 @@ export async function mountWasmLab(target: HTMLElement, options: WasmLabOptions)
           </div>
         </div>
       </section>
+      <div class="wasm-grid">
+        <section class="wasm-panel wasm-panel-tracklist">
+          <div class="wasm-panel-head">
+            <span class="wasm-panel-kicker">Prototype tracks</span>
+            <h3>Choose the first experiment</h3>
+          </div>
+          <div class="wasm-track-list" data-wasm-track-list></div>
+        </section>
+
+        <section class="wasm-panel wasm-panel-detail">
+          <div class="wasm-panel-head">
+            <span class="wasm-panel-kicker">Selected direction</span>
+            <h3 data-wasm-track-title>Terrain Mesh Builder</h3>
+          </div>
+          <p class="wasm-track-summary" data-wasm-track-summary></p>
+          <div class="wasm-detail-grid">
+            <article class="wasm-detail-card">
+              <strong>Why WASM here</strong>
+              <p data-wasm-track-why></p>
+            </article>
+            <article class="wasm-detail-card">
+              <strong>Data in</strong>
+              <p data-wasm-track-in></p>
+            </article>
+            <article class="wasm-detail-card">
+              <strong>Data out</strong>
+              <p data-wasm-track-out></p>
+            </article>
+            <article class="wasm-detail-card">
+              <strong>Milestone one</strong>
+              <p data-wasm-track-milestone></p>
+            </article>
+          </div>
+        </section>
+      </div>
       <section class="wasm-panel wasm-panel-live">
         <div class="wasm-panel-head">
           <span class="wasm-panel-kicker">Why ship WASM at all?</span>
@@ -2382,41 +2421,6 @@ export async function mountWasmLab(target: HTMLElement, options: WasmLabOptions)
           </div>
         </div>
       </section>
-      <div class="wasm-grid">
-        <section class="wasm-panel wasm-panel-tracklist">
-          <div class="wasm-panel-head">
-            <span class="wasm-panel-kicker">Prototype tracks</span>
-            <h3>Choose the first experiment</h3>
-          </div>
-          <div class="wasm-track-list" data-wasm-track-list></div>
-        </section>
-
-        <section class="wasm-panel wasm-panel-detail">
-          <div class="wasm-panel-head">
-            <span class="wasm-panel-kicker">Selected direction</span>
-            <h3 data-wasm-track-title>Terrain Mesh Builder</h3>
-          </div>
-          <p class="wasm-track-summary" data-wasm-track-summary></p>
-          <div class="wasm-detail-grid">
-            <article class="wasm-detail-card">
-              <strong>Why WASM here</strong>
-              <p data-wasm-track-why></p>
-            </article>
-            <article class="wasm-detail-card">
-              <strong>Data in</strong>
-              <p data-wasm-track-in></p>
-            </article>
-            <article class="wasm-detail-card">
-              <strong>Data out</strong>
-              <p data-wasm-track-out></p>
-            </article>
-            <article class="wasm-detail-card">
-              <strong>Milestone one</strong>
-              <p data-wasm-track-milestone></p>
-            </article>
-          </div>
-        </section>
-      </div>
 
       <div class="wasm-lower-grid">
         <section class="wasm-panel">
