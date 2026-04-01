@@ -1,6 +1,7 @@
 import "./style.css";
 
 import type { HouseLabHandle } from "./house-lab";
+import type { WasmLabHandle } from "./wasm-lab";
 import * as THREE from "three/webgpu";
 import WebGPU from "three/addons/capabilities/WebGPU.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
@@ -13,7 +14,7 @@ import { mergeVertices } from "three/addons/utils/BufferGeometryUtils.js";
 import { Fn, color, cos, instanceIndex, instancedArray, localId, mix, normalLocal, positionLocal, sin, textureStore, time, uvec2, uniform, uv, vec3, vec4, workgroupId } from "three/tsl";
 
 type CameraMode = "orbit" | "fps";
-type AppTab = "gallery" | "house";
+type AppTab = "gallery" | "house" | "wasm";
 
 type ExampleViewState = {
   wireframe: boolean;
@@ -2025,7 +2026,7 @@ const examples: ExampleDefinition[] = [
 
       const shadowState = {
         caster: "all",
-        shadowType: "PCF Soft",
+        shadowType: "PCF",
         showHelpers: false,
         animate: true,
         bias: 0,
@@ -2042,7 +2043,6 @@ const examples: ExampleDefinition[] = [
         const typeMap = {
           Basic: THREE.BasicShadowMap,
           PCF: THREE.PCFShadowMap,
-          "PCF Soft": THREE.PCFSoftShadowMap,
           VSM: THREE.VSMShadowMap,
         } as const;
 
@@ -2107,7 +2107,6 @@ const examples: ExampleDefinition[] = [
             .add(shadowState, "shadowType", {
               Basic: "Basic",
               PCF: "PCF",
-              "PCF Soft": "PCF Soft",
               VSM: "VSM",
             })
             .name("shadow filter")
@@ -2141,9 +2140,9 @@ const examples: ExampleDefinition[] = [
   {
     step: "Step 04C",
     title: "PBR Lookdev Board",
-    summary: "Lay out a full material-ball board so roughness, metalness, transmission, and shader-authored surfaces can be compared under one studio rig.",
+    summary: "Lay out a full material-ball board so roughness, metalness, clearcoat, and shader-authored surfaces can be compared under one studio rig.",
     notes:
-      "This is the kind of scene you use to judge whether a shader is actually good. The rows sweep dielectrics, metals, clearcoat, transmission, and custom node-driven looks while sharing the same environment and lights.",
+      "This is the kind of scene you use to judge whether a shader is actually good. The rows sweep dielectrics, metals, coated finishes, and custom node-driven looks while sharing the same environment and lights.",
     tags: ["MeshPhysicalMaterial", "PMREM", "MeshPhysicalNodeMaterial"],
     cameraPosition: [-1.8, 5.4, 12.2],
     target: [0, 1.1, -0.2],
@@ -2178,7 +2177,7 @@ const examples: ExampleDefinition[] = [
         metals: true,
         dielectrics: true,
         clearcoat: true,
-        transmission: true,
+        sheen: true,
         shaders: true,
       };
 
@@ -2398,19 +2397,19 @@ const examples: ExampleDefinition[] = [
           },
         },
         {
-          key: "transmission",
+          key: "sheen",
           materialAt: (column: number) => {
             const palette = ["#a7bdd7", "#a5cdd6", "#d7bf9f", "#cfbde6", "#add8bf", "#d8aeb0"];
             const t = column / lastColumn;
             return createPhysicalMaterial({
               color: palette[column % palette.length],
-              roughness: 0.02 + t * 0.18,
+              roughness: 0.18 + t * 0.28,
               metalness: 0,
-              transmission: 1,
-              thickness: 0.8 + t * 0.8,
-              ior: 1.08 + t * 0.7,
-              attenuationDistance: 1.8,
-              attenuationColor: new THREE.Color(palette[column % palette.length]).multiplyScalar(0.6),
+              clearcoat: 1,
+              clearcoatRoughness: 0.04 + t * 0.18,
+              sheen: 0.5 + t * 0.35,
+              sheenColor: new THREE.Color(palette[column % palette.length]).lerp(new THREE.Color("#fff4da"), 0.42),
+              sheenRoughness: 0.16 + t * 0.28,
             });
           },
         },
@@ -2451,10 +2450,11 @@ const examples: ExampleDefinition[] = [
         }),
         createPhysicalMaterial({
           color: "#d6d9e4",
-          roughness: 0.08,
-          transmission: 1,
-          thickness: 1.3,
-          ior: 1.3,
+          roughness: 0.14,
+          clearcoat: 0.8,
+          clearcoatRoughness: 0.05,
+          sheen: 0.35,
+          sheenColor: "#eef5ff",
         }),
         createPhysicalMaterial({
           color: "#627a5f",
@@ -2541,7 +2541,7 @@ const examples: ExampleDefinition[] = [
         rowGroups.metals.visible = studioState.metals;
         rowGroups.dielectrics.visible = studioState.dielectrics;
         rowGroups.clearcoat.visible = studioState.clearcoat;
-        rowGroups.transmission.visible = studioState.transmission;
+        rowGroups.sheen.visible = studioState.sheen;
         rowGroups.shaders.visible = studioState.shaders;
         props.visible = studioState.showProps;
       };
@@ -2599,7 +2599,7 @@ const examples: ExampleDefinition[] = [
           rowsFolder.add(studioState, "metals").name("metals").onChange(syncVisibility);
           rowsFolder.add(studioState, "dielectrics").name("dielectrics").onChange(syncVisibility);
           rowsFolder.add(studioState, "clearcoat").name("clearcoat").onChange(syncVisibility);
-          rowsFolder.add(studioState, "transmission").name("transmission").onChange(syncVisibility);
+          rowsFolder.add(studioState, "sheen").name("sheen row").onChange(syncVisibility);
           rowsFolder.add(studioState, "shaders").name("shader row").onChange(syncVisibility);
           rowsFolder.add(studioState, "showProps").name("back props").onChange(syncVisibility);
         },
@@ -2864,10 +2864,12 @@ const examples: ExampleDefinition[] = [
             roughness: 0.06,
             clearcoat: 1,
             clearcoatRoughness: 0.03,
-            transmission: 0.18,
-            thickness: 0.8,
-            attenuationDistance: 2.2,
-            attenuationColor: "#f2d2a1",
+            sheen: 0.28,
+            sheenColor: "#fff0c8",
+            sheenRoughness: 0.14,
+            iridescence: 0.24,
+            iridescenceIOR: 1.18,
+            iridescenceThicknessRange: [120, 320],
           },
         },
         {
@@ -2928,10 +2930,12 @@ const examples: ExampleDefinition[] = [
             roughness: 0.12,
             clearcoat: 1,
             clearcoatRoughness: 0.03,
-            transmission: 0.28,
-            thickness: 0.95,
-            attenuationDistance: 1.6,
-            attenuationColor: "#f08c77",
+            sheen: 0.22,
+            sheenColor: "#ffd8ce",
+            sheenRoughness: 0.18,
+            iridescence: 0.16,
+            iridescenceIOR: 1.16,
+            iridescenceThicknessRange: [80, 220],
           },
         },
       ];
@@ -8194,6 +8198,7 @@ app.innerHTML = `
     <nav class="app-tabs" aria-label="Application mode">
       <button class="app-tab is-active" data-app-tab="gallery" type="button" aria-selected="true">Learning Gallery</button>
       <button class="app-tab" data-app-tab="house" type="button" aria-selected="false">House Lab</button>
+      <button class="app-tab" data-app-tab="wasm" type="button" aria-selected="false">WASM Lab</button>
     </nav>
     <section class="app-panel app-panel-active" data-app-panel="gallery">
       <section id="examples" class="examples-grid"></section>
@@ -8204,6 +8209,7 @@ app.innerHTML = `
       </p>
     </section>
     <section class="app-panel" data-app-panel="house" hidden></section>
+    <section class="app-panel" data-app-panel="wasm" hidden></section>
   </main>
 `;
 
@@ -8211,11 +8217,12 @@ const statusTarget = document.querySelector<HTMLDivElement>("#runtime-status");
 const examplesTarget = document.querySelector<HTMLDivElement>("#examples");
 const galleryPanel = document.querySelector<HTMLElement>("[data-app-panel='gallery']");
 const housePanel = document.querySelector<HTMLElement>("[data-app-panel='house']");
+const wasmPanel = document.querySelector<HTMLElement>("[data-app-panel='wasm']");
 const appTabButtons = [...document.querySelectorAll<HTMLButtonElement>("[data-app-tab]")];
 const pageShell = document.querySelector<HTMLElement>(".page-shell");
 const hasNativeWebGPU = WebGPU.isAvailable();
 
-if (!statusTarget || !examplesTarget || !galleryPanel || !housePanel || !pageShell) {
+if (!statusTarget || !examplesTarget || !galleryPanel || !housePanel || !wasmPanel || !pageShell) {
   throw new Error("Could not find page targets");
 }
 
@@ -8278,6 +8285,35 @@ const mountingExamples = new Map<number, Promise<void>>();
 let activeAppTab: AppTab = "gallery";
 let houseLabHandle: HouseLabHandle | null = null;
 let houseLabMounting: Promise<void> | null = null;
+let wasmLabHandle: WasmLabHandle | null = null;
+let wasmLabMounting: Promise<void> | null = null;
+
+type LazyMount<THandle> = (
+  target: HTMLElement,
+  options: { prefersTouchInput: boolean; hasNativeWebGPU: boolean },
+) => Promise<THandle>;
+
+type LazyModule = {
+  default?: unknown;
+  mountHouseLab?: unknown;
+  mountWasmLab?: unknown;
+};
+
+const resolveLazyMount = <THandle>(moduleName: "house-lab" | "wasm-lab", module: LazyModule) => {
+  const nestedDefault =
+    module.default && typeof module.default === "object" ? (module.default as LazyModule) : null;
+  const candidate =
+    moduleName === "house-lab"
+      ? module.mountHouseLab ?? nestedDefault?.mountHouseLab ?? module.default
+      : module.mountWasmLab ?? nestedDefault?.mountWasmLab ?? module.default;
+
+  if (typeof candidate === "function") {
+    return candidate as LazyMount<THandle>;
+  }
+
+  const availableKeys = Object.keys(module).join(", ") || "(none)";
+  throw new TypeError(`Lazy module "${moduleName}" did not expose a mount function. Keys: ${availableKeys}`);
+};
 let appDisposed = false;
 let focusedExampleIndex: number | null = null;
 let focusedExamplePlaceholder: Comment | null = null;
@@ -8557,6 +8593,7 @@ const reconcileFallbackExamples = () => {
 
 const syncActivePanel = () => {
   pageShell.classList.toggle("page-shell-house", activeAppTab === "house");
+  pageShell.classList.toggle("page-shell-wasm", activeAppTab === "wasm");
   document.documentElement.classList.toggle("body-house-app", activeAppTab === "house");
   document.body.classList.toggle("body-house-app", activeAppTab === "house");
 
@@ -8568,8 +8605,10 @@ const syncActivePanel = () => {
 
   galleryPanel.hidden = activeAppTab !== "gallery";
   housePanel.hidden = activeAppTab !== "house";
+  wasmPanel.hidden = activeAppTab !== "wasm";
   galleryPanel.classList.toggle("app-panel-active", activeAppTab === "gallery");
   housePanel.classList.toggle("app-panel-active", activeAppTab === "house");
+  wasmPanel.classList.toggle("app-panel-active", activeAppTab === "wasm");
   exampleActivityDirty = true;
 };
 
@@ -8581,12 +8620,14 @@ const ensureHouseLabMounted = async () => {
   if (!houseLabMounting) {
     housePanel.innerHTML = `<div class="house-loading">Preparing the planner and 3D preview…</div>`;
     houseLabMounting = import("./house-lab")
-      .then(({ mountHouseLab }) =>
-        mountHouseLab(housePanel, {
+      .then((module) => {
+        const mountHouseLab = resolveLazyMount<HouseLabHandle>("house-lab", module);
+
+        return mountHouseLab(housePanel, {
           prefersTouchInput,
           hasNativeWebGPU,
-        }),
-      )
+        });
+      })
       .then((handle) => {
         if (appDisposed) {
           handle.dispose();
@@ -8609,6 +8650,44 @@ const ensureHouseLabMounted = async () => {
   await houseLabMounting;
 };
 
+const ensureWasmLabMounted = async () => {
+  if (wasmLabHandle) {
+    return;
+  }
+
+  if (!wasmLabMounting) {
+    wasmPanel.innerHTML = `<div class="house-loading">Preparing the WASM playground…</div>`;
+    wasmLabMounting = import("./wasm-lab")
+      .then((module) => {
+        const mountWasmLab = resolveLazyMount<WasmLabHandle>("wasm-lab", module);
+
+        return mountWasmLab(wasmPanel, {
+          prefersTouchInput,
+          hasNativeWebGPU,
+        });
+      })
+      .then((handle) => {
+        if (appDisposed) {
+          handle.dispose();
+          return;
+        }
+
+        wasmLabHandle = handle;
+        wasmLabHandle.setVisible(activeAppTab === "wasm");
+      })
+      .catch((error) => {
+        const details = error instanceof Error ? error.message : String(error);
+        wasmPanel.innerHTML = `<div class="house-error">WASM Lab failed to load.<br>${details}</div>`;
+        console.error("WASM Lab failed to mount", error);
+      })
+      .finally(() => {
+        wasmLabMounting = null;
+      });
+  }
+
+  await wasmLabMounting;
+};
+
 const setActiveAppTab = async (nextTab: AppTab) => {
   if (nextTab !== "gallery" && focusedExampleIndex !== null) {
     clearFocusedExample(false);
@@ -8618,6 +8697,11 @@ const setActiveAppTab = async (nextTab: AppTab) => {
     if (nextTab === "house") {
       await ensureHouseLabMounted();
       houseLabHandle?.setVisible(true);
+      wasmLabHandle?.setVisible(false);
+    } else if (nextTab === "wasm") {
+      await ensureWasmLabMounted();
+      wasmLabHandle?.setVisible(true);
+      houseLabHandle?.setVisible(false);
     }
     return;
   }
@@ -8625,19 +8709,30 @@ const setActiveAppTab = async (nextTab: AppTab) => {
   activeAppTab = nextTab;
   syncActivePanel();
 
-  if (nextTab === "house") {
+  if (nextTab === "house" || nextTab === "wasm") {
     if (!hasNativeWebGPU) {
       for (let index = 0; index < mountedExamples.length; index += 1) {
         unmountExample(index);
       }
     }
+  }
 
+  if (nextTab === "house") {
     await ensureHouseLabMounted();
     houseLabHandle?.setVisible(true);
+    wasmLabHandle?.setVisible(false);
+    return;
+  }
+
+  if (nextTab === "wasm") {
+    houseLabHandle?.setVisible(false);
+    await ensureWasmLabMounted();
+    wasmLabHandle?.setVisible(true);
     return;
   }
 
   houseLabHandle?.setVisible(false);
+  wasmLabHandle?.setVisible(false);
   scrollSuspendUntil = performance.now() + 180;
 
   for (const mounted of mountedExamples) {
@@ -8656,7 +8751,8 @@ const setActiveAppTab = async (nextTab: AppTab) => {
 
 appTabButtons.forEach((button) => {
   button.addEventListener("click", () => {
-    const nextTab = button.dataset.appTab === "house" ? "house" : "gallery";
+    const requestedTab = button.dataset.appTab;
+    const nextTab: AppTab = requestedTab === "house" || requestedTab === "wasm" ? requestedTab : "gallery";
     void setActiveAppTab(nextTab);
   });
 });
@@ -8798,6 +8894,7 @@ renderFrameHandle = requestAnimationFrame(renderLoop);
       }
 
       houseLabHandle?.dispose();
+      wasmLabHandle?.dispose();
     };
 
     requestAnimationFrame(() => {
@@ -8831,7 +8928,7 @@ async function mountExample(card: HTMLElement, example: ExampleDefinition): Prom
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.1;
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.type = THREE.PCFShadowMap;
   await renderer.init();
 
   renderer.domElement.style.width = "100%";

@@ -4,9 +4,10 @@
   "version": "0.0.0",
   "description": "Interactive Three.js WebGPU learning gallery",
   "scripts": {
-    "dev": "node ./scripts/run-cli.mjs ./node_modules/vite/bin/vite.js",
-    "build": "node ./scripts/run-cli.mjs ./node_modules/typescript/bin/tsc --next ./node_modules/vite/bin/vite.js build",
-    "preview": "node ./scripts/run-cli.mjs ./node_modules/vite/bin/vite.js preview"
+    "build:wasm": "node ./scripts/build-wasm.mjs",
+    "dev": "node ./scripts/build-wasm.mjs --quiet && node ./scripts/run-cli.mjs ./node_modules/vite/bin/vite.js",
+    "build": "node ./scripts/build-wasm.mjs --quiet && node ./scripts/run-cli.mjs ./node_modules/typescript/bin/tsc --next ./node_modules/vite/bin/vite.js build",
+    "preview": "node ./scripts/build-wasm.mjs --quiet && node ./scripts/run-cli.mjs ./node_modules/vite/bin/vite.js preview"
   },
   "keywords": [
     "threejs",
@@ -17,11 +18,13 @@
   "license": "MIT",
   "type": "module",
   "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.12.0",
     "three": "^0.183.2"
   },
   "devDependencies": {
     "@types/three": "^0.183.1",
     "typescript": "^6.0.2",
-    "vite": "^8.0.3"
+    "vite": "^8.0.3",
+    "wabt": "^1.0.39"
   }
 }

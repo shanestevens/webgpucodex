@@ -5,3 +5,7 @@ npm-debug.log*
 dev.stdout.log
 dev.stderr.log
 tmp/
+.tools/
+tmp-dev-out.log
+tmp-dev-err.log
+public/wasm/

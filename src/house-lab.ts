@@ -1045,7 +1045,7 @@ export async function mountHouseLab(target: HTMLElement, options: HouseLabOption
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.02;
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.type = THREE.PCFShadowMap;
   await renderer.init();
   renderer.domElement.style.width = "100%";
   renderer.domElement.style.height = "100%";
