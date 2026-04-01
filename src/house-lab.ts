@@ -156,6 +156,15 @@ function wallLength(wall: SketchWall): number {
   return Math.abs(wall.x2 - wall.x1) + Math.abs(wall.y2 - wall.y1);
 }
 
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 function roomCenterX(room: RoomFootprint): number {
   return -GRID_WIDTH_METERS * 0.5 + room.x + room.width * 0.5;
 }
@@ -624,6 +633,21 @@ export async function mountHouseLab(target: HTMLElement, options: HouseLabOption
               <div class="house-room-summary" data-house-room-summary></div>
             </div>
           </div>
+          <div class="house-section">
+            <div class="house-section-title">AI Export</div>
+            <p class="house-export-note">
+              Export separate layout and massing references for AI, then upload them with one strong inspiration house photo instead of one mixed poster.
+            </p>
+            <div class="house-export-row">
+              <button class="house-secondary-button" data-house-export="plan" type="button">Open plan</button>
+              <button class="house-secondary-button" data-house-export="massing" type="button">Open massing</button>
+              <button class="house-secondary-button" data-house-export="pack" type="button">Open exterior pack</button>
+              <button class="house-secondary-button" data-house-export="brief" type="button">Copy strict brief</button>
+            </div>
+            <div class="house-export-status" data-house-export-status>
+              Use the plan, the reference views, and one strong inspiration image together for the best AI results.
+            </div>
+          </div>
         </aside>
         <section class="house-plan-column">
           <div class="house-panel-card">
@@ -675,6 +699,8 @@ export async function mountHouseLab(target: HTMLElement, options: HouseLabOption
   const presetButtons = [...target.querySelectorAll<HTMLButtonElement>("[data-house-preset]")];
   const deleteButton = target.querySelector<HTMLButtonElement>("[data-house-action='delete']");
   const resetButton = target.querySelector<HTMLButtonElement>("[data-house-action='reset']");
+  const exportButtons = [...target.querySelectorAll<HTMLButtonElement>("[data-house-export]")];
+  const exportStatus = target.querySelector<HTMLDivElement>("[data-house-export-status]");
   const fieldLabelEls = {
     label: target.querySelector<HTMLSpanElement>("[data-house-field-label='label']"),
     x: target.querySelector<HTMLSpanElement>("[data-house-field-label='x']"),
@@ -703,6 +729,7 @@ export async function mountHouseLab(target: HTMLElement, options: HouseLabOption
     !roomSummary ||
     !deleteButton ||
     !resetButton ||
+    !exportStatus ||
     Object.values(fieldLabelEls).some((value) => !value) ||
     Object.values(fieldInputs).some((value) => !value)
   ) {
@@ -1332,6 +1359,770 @@ export async function mountHouseLab(target: HTMLElement, options: HouseLabOption
     state.planDirty = false;
   };
 
+  let exportBusy = false;
+
+  const hasLayoutContent = () => state.rooms.length > 0 || state.walls.length > 0;
+
+  const setExportStatus = (message: string, tone: "default" | "busy" | "success" | "error" = "default") => {
+    exportStatus.textContent = message;
+    exportStatus.dataset.houseExportTone = tone;
+  };
+
+  const syncExportAvailability = () => {
+    const disabled = exportBusy || !hasLayoutContent();
+
+    exportButtons.forEach((button) => {
+      button.disabled = disabled;
+    });
+
+    if (!hasLayoutContent()) {
+      setExportStatus("Draw some walls or room blocks first, then export the clean plan, massing, and prompt brief.", "default");
+    } else if (!exportBusy && !exportStatus.dataset.houseExportTone) {
+      setExportStatus("Use the plan, the reference views, and one strong inspiration image together for the best AI results.");
+    }
+  };
+
+  const computeLayoutMetrics = () => {
+    let minX = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let minY = Number.POSITIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
+    let minHeight = Number.POSITIVE_INFINITY;
+    let maxHeight = Number.NEGATIVE_INFINITY;
+    let totalWallThickness = 0;
+    let thicknessSamples = 0;
+
+    for (const room of state.rooms) {
+      minX = Math.min(minX, room.x);
+      maxX = Math.max(maxX, room.x + room.width);
+      minY = Math.min(minY, room.y);
+      maxY = Math.max(maxY, room.y + room.depth);
+      minHeight = Math.min(minHeight, room.height);
+      maxHeight = Math.max(maxHeight, room.height);
+      totalWallThickness += room.wallThickness;
+      thicknessSamples += 1;
+    }
+
+    for (const wall of state.walls) {
+      const halfThickness = wall.thickness * 0.5;
+      minX = Math.min(minX, wall.x1, wall.x2) - halfThickness;
+      maxX = Math.max(maxX, wall.x1, wall.x2) + halfThickness;
+      minY = Math.min(minY, wall.y1, wall.y2) - halfThickness;
+      maxY = Math.max(maxY, wall.y1, wall.y2) + halfThickness;
+      minHeight = Math.min(minHeight, wall.height);
+      maxHeight = Math.max(maxHeight, wall.height);
+      totalWallThickness += wall.thickness;
+      thicknessSamples += 1;
+    }
+
+    if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+      minX = 0;
+      minY = 0;
+      maxX = GRID_WIDTH_METERS;
+      maxY = GRID_HEIGHT_METERS;
+    }
+
+    if (!Number.isFinite(minHeight) || !Number.isFinite(maxHeight)) {
+      minHeight = DEFAULT_WALL_HEIGHT;
+      maxHeight = DEFAULT_WALL_HEIGHT;
+    }
+
+    const width = Math.max(maxX - minX, GRID_STEP_METERS);
+    const depth = Math.max(maxY - minY, GRID_STEP_METERS);
+
+    return {
+      minX,
+      minY,
+      maxX,
+      maxY,
+      width,
+      depth,
+      centerX: -GRID_WIDTH_METERS * 0.5 + (minX + maxX) * 0.5,
+      centerZ: -GRID_HEIGHT_METERS * 0.5 + (minY + maxY) * 0.5,
+      minHeight,
+      maxHeight,
+      averageWallThickness: thicknessSamples > 0 ? totalWallThickness / thicknessSamples : DEFAULT_WALL_THICKNESS,
+      roomCount: state.rooms.length,
+      wallCount: state.walls.length,
+    };
+  };
+
+  const buildAiPlanSvgMarkup = (includeNorthMarker = false) => {
+    const roomMarkup = state.rooms
+      .map((room) => {
+        const x = room.x * PIXELS_PER_METER;
+        const y = room.y * PIXELS_PER_METER;
+        const width = room.width * PIXELS_PER_METER;
+        const height = room.depth * PIXELS_PER_METER;
+        const fill = new THREE.Color(room.color).lerp(new THREE.Color("#ffffff"), 0.52).getStyle();
+        const stroke = new THREE.Color(room.color).offsetHSL(0, -0.02, -0.18).getStyle();
+
+        return `
+          <g class="plan-room">
+            <rect x="${x}" y="${y}" width="${width}" height="${height}" rx="16" ry="16" fill="${fill}" stroke="${stroke}" stroke-width="2.5" />
+            <text x="${x + width / 2}" y="${y + height / 2 - 8}" text-anchor="middle" class="plan-room-label">${escapeHtml(room.label)}</text>
+            <text x="${x + width / 2}" y="${y + height / 2 + 16}" text-anchor="middle" class="plan-room-dim">${formatMeters(room.width)} × ${formatMeters(room.depth)}</text>
+          </g>
+        `;
+      })
+      .join("");
+
+    const wallMarkup = state.walls
+      .map((wall) => {
+        const x1 = wall.x1 * PIXELS_PER_METER;
+        const y1 = wall.y1 * PIXELS_PER_METER;
+        const x2 = wall.x2 * PIXELS_PER_METER;
+        const y2 = wall.y2 * PIXELS_PER_METER;
+        const horizontal = Math.abs(wall.x2 - wall.x1) >= Math.abs(wall.y2 - wall.y1);
+        const labelX = (x1 + x2) * 0.5 + (horizontal ? 0 : 20);
+        const labelY = (y1 + y2) * 0.5 + (horizontal ? -16 : 5);
+
+        return `
+          <g class="plan-wall">
+            <line class="plan-wall-line" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" />
+            <circle class="plan-wall-node" cx="${x1}" cy="${y1}" r="4.5" />
+            <circle class="plan-wall-node" cx="${x2}" cy="${y2}" r="4.5" />
+            <text x="${labelX}" y="${labelY}" text-anchor="middle" class="plan-wall-label">${formatMeters(wallLength(wall))}</text>
+          </g>
+        `;
+      })
+      .join("");
+
+    const northMarker = includeNorthMarker
+      ? `
+        <g aria-label="Plan north marker">
+          <circle cx="${planWidthPx - 64}" cy="52" r="22" fill="rgba(255,255,255,0.5)" stroke="rgba(34,48,67,0.18)" stroke-width="2" />
+          <path d="M ${planWidthPx - 64} 36 L ${planWidthPx - 71} 60 L ${planWidthPx - 64} 54 L ${planWidthPx - 57} 60 Z" fill="#223043" />
+          <text x="${planWidthPx - 64}" y="76" text-anchor="middle" class="plan-wall-label">N</text>
+        </g>
+      `
+      : "";
+
+    return `
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        viewBox="0 0 ${planWidthPx} ${planHeightPx}"
+        class="house-export-plan-svg"
+        role="img"
+        aria-label="House Lab floor plan export"
+      >
+        <style>
+          .house-grid-board { fill: #f5ecd8; }
+          .house-grid-ruler-band { fill: rgba(255, 255, 255, 0.34); }
+          .house-grid-line-major { stroke: rgba(75, 85, 99, 0.15); stroke-width: 1.5; }
+          .house-grid-line-minor { stroke: rgba(75, 85, 99, 0.07); stroke-width: 1; }
+          .house-grid-ruler { fill: rgba(72, 66, 57, 0.38); font: 500 15px "JetBrains Mono", monospace; }
+          .plan-room-label { fill: #223043; font: 700 18px "Space Grotesk", sans-serif; }
+          .plan-room-dim { fill: rgba(34, 48, 67, 0.74); font: 500 16px "JetBrains Mono", monospace; }
+          .plan-wall-line { stroke: #adc7e2; stroke-width: 10; stroke-linecap: round; }
+          .plan-wall-node { fill: #f7ead0; stroke: #adc7e2; stroke-width: 3; }
+          .plan-wall-label { fill: rgba(34, 48, 67, 0.7); font: 600 16px "JetBrains Mono", monospace; }
+        </style>
+        ${gridBackdropMarkup}
+        ${roomMarkup}
+        ${wallMarkup}
+        ${northMarker}
+      </svg>
+    `.trim();
+  };
+
+  const buildRoomProgramMarkup = () =>
+    state.rooms.length > 0
+      ? state.rooms
+          .map(
+            (room) =>
+              `<li><strong>${escapeHtml(room.label)}</strong><span>${formatMeters(room.width)} × ${formatMeters(room.depth)} × ${formatMeters(room.height)}</span></li>`,
+          )
+          .join("")
+      : `<li><strong>No room blocks yet</strong><span>Walls-only layouts still export well for footprint control.</span></li>`;
+
+  const createAiBrief = () => {
+    const metrics = computeLayoutMetrics();
+    const roomLines =
+      state.rooms.length > 0
+        ? state.rooms
+            .map(
+              (room) =>
+                `- ${room.label}: ${formatMeters(room.width)} wide x ${formatMeters(room.depth)} deep x ${formatMeters(room.height)} high`,
+            )
+            .join("\n")
+        : "- No room blocks are labeled yet. Use the wall plan as the primary layout guide.";
+
+    return [
+      "Use the uploaded plan image as the authoritative layout guide.",
+      "Use the uploaded elevation and axonometric massing images as hard proportion and form references.",
+      "Use the uploaded inspiration house photo only for style, materials, roof language, windows, and landscaping mood.",
+      "",
+      "Do not invent a radically different building.",
+      "Preserve the footprint, outer wall placement, room arrangement, and overall massing from the plan and reference views.",
+      "If the inspiration image conflicts with the exported layout, prioritize the exported layout.",
+      "Keep the concept to a believable residential exterior in soft daylight with realistic materials and restrained architectural visualization styling.",
+      "",
+      `Planning canvas: ${formatMeters(GRID_WIDTH_METERS)} x ${formatMeters(GRID_HEIGHT_METERS)}`,
+      `Designed footprint: ${formatMeters(metrics.width)} x ${formatMeters(metrics.depth)}`,
+      `Wall segments: ${metrics.wallCount}`,
+      `Rooms: ${metrics.roomCount}`,
+      `Wall height range: ${formatMeters(metrics.minHeight)} to ${formatMeters(metrics.maxHeight)}`,
+      `Typical wall thickness: ${formatMeters(metrics.averageWallThickness)}`,
+      "Plan orientation: top of plan = north.",
+      "",
+      "Room program:",
+      roomLines,
+      "",
+      "Recommended upload order:",
+      "1. Plan PNG",
+      "2. South elevation",
+      "3. East elevation",
+      "4. Axonometric massing",
+      "5. Current framed preview",
+      "6. Inspiration house photo",
+    ].join("\n");
+  };
+
+  const createExportPopup = (title: string) => {
+    const popup = window.open("", "_blank");
+
+    if (!popup) {
+      return null;
+    }
+
+    popup.document.write(`
+      <!doctype html>
+      <html lang="en">
+        <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <title>${escapeHtml(title)}</title>
+          <style>
+            :root {
+              color-scheme: light;
+              font-family: "Space Grotesk", "Segoe UI", sans-serif;
+              background: #f4efe6;
+              color: #1e293b;
+            }
+
+            * { box-sizing: border-box; }
+
+            body {
+              margin: 0;
+              min-height: 100vh;
+              background:
+                radial-gradient(circle at top left, rgba(160, 198, 232, 0.22), transparent 36%),
+                linear-gradient(180deg, #f8f4ec 0%, #f2ecdf 100%);
+            }
+
+            .shell {
+              width: min(1400px, calc(100% - 48px));
+              margin: 0 auto;
+              padding: 32px 0 40px;
+            }
+
+            .card {
+              padding: 24px;
+              border-radius: 26px;
+              background: rgba(255, 255, 255, 0.7);
+              border: 1px solid rgba(102, 123, 148, 0.16);
+              box-shadow: 0 24px 56px rgba(32, 45, 62, 0.12);
+            }
+
+            .loading {
+              display: grid;
+              place-items: center;
+              min-height: calc(100vh - 96px);
+              color: #45556c;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="shell">
+            <div class="card loading">Preparing export…</div>
+          </div>
+        </body>
+      </html>
+    `);
+    popup.document.close();
+    return popup;
+  };
+
+  const captureCanvasDataUrl = (canvas: HTMLCanvasElement) => {
+    if (canvas.width === 0 || canvas.height === 0) {
+      throw new Error("The massing preview is not ready yet.");
+    }
+
+    try {
+      const direct = canvas.toDataURL("image/png");
+
+      if (direct && direct !== "data:,") {
+        return direct;
+      }
+    } catch {
+      // Fall through to 2D copy.
+    }
+
+    const exportCanvas = document.createElement("canvas");
+    exportCanvas.width = canvas.width;
+    exportCanvas.height = canvas.height;
+    const context = exportCanvas.getContext("2d");
+
+    if (!context) {
+      throw new Error("Could not prepare an export canvas.");
+    }
+
+    context.drawImage(canvas, 0, 0);
+    return exportCanvas.toDataURL("image/png");
+  };
+
+  const writeImagePopup = (popup: Window, title: string, dataUrl: string, subtitle: string) => {
+    popup.document.open();
+    popup.document.write(`
+      <!doctype html>
+      <html lang="en">
+        <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <title>${escapeHtml(title)}</title>
+          <style>
+            :root {
+              color-scheme: light;
+              font-family: "Space Grotesk", "Segoe UI", sans-serif;
+              background: #f3ede2;
+              color: #223043;
+            }
+
+            * { box-sizing: border-box; }
+
+            body {
+              margin: 0;
+              min-height: 100vh;
+              background:
+                radial-gradient(circle at top left, rgba(160, 198, 232, 0.18), transparent 34%),
+                linear-gradient(180deg, #faf7f0 0%, #f2ecdf 100%);
+            }
+
+            .shell {
+              width: min(1320px, calc(100% - 48px));
+              margin: 0 auto;
+              padding: 32px 0 40px;
+            }
+
+            .card {
+              padding: 24px;
+              border-radius: 28px;
+              background: rgba(255, 255, 255, 0.72);
+              border: 1px solid rgba(102, 123, 148, 0.16);
+              box-shadow: 0 24px 56px rgba(32, 45, 62, 0.12);
+            }
+
+            h1 {
+              margin: 0 0 8px;
+              font-size: clamp(2rem, 4vw, 3rem);
+              line-height: 0.96;
+            }
+
+            p {
+              margin: 0 0 18px;
+              max-width: 60ch;
+              color: #5b6b7f;
+            }
+
+            img,
+            svg {
+              display: block;
+              width: 100%;
+              height: auto;
+              border-radius: 22px;
+              border: 1px solid rgba(102, 123, 148, 0.14);
+              background: #fffdf8;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="shell">
+            <div class="card">
+              <h1>${escapeHtml(title)}</h1>
+              <p>${escapeHtml(subtitle)}</p>
+              <img src="${dataUrl}" alt="${escapeHtml(title)}" />
+            </div>
+          </div>
+        </body>
+      </html>
+    `);
+    popup.document.close();
+  };
+
+  const createPlanSvgDataUrl = (svgMarkup: string) => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgMarkup)}`;
+
+  const loadImage = (src: string) =>
+    new Promise<HTMLImageElement>((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error("Could not load the exported plan image."));
+      image.src = src;
+    });
+
+  const rasterizePlanSvg = async (svgMarkup: string) => {
+    const image = await loadImage(createPlanSvgDataUrl(svgMarkup));
+    const canvas = document.createElement("canvas");
+    canvas.width = planWidthPx;
+    canvas.height = planHeightPx;
+    const context = canvas.getContext("2d");
+
+    if (!context) {
+      throw new Error("Could not create a canvas for the plan export.");
+    }
+
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/png");
+  };
+
+  const captureSceneWithCamera = (captureCamera: THREE.Camera) => {
+    const savedGridVisible = gridHelper.visible;
+    const savedSelection = cloneSelection(state.selection);
+
+    if (previewSizeDirty) {
+      syncPreviewSize();
+    }
+
+    if (state.previewDirty) {
+      rebuildPreview();
+    }
+
+    gridHelper.visible = false;
+    state.selection = null;
+    rebuildPreview();
+    scene.updateMatrixWorld(true);
+
+    if (captureCamera instanceof THREE.PerspectiveCamera || captureCamera instanceof THREE.OrthographicCamera) {
+      captureCamera.updateProjectionMatrix();
+      captureCamera.updateMatrixWorld(true);
+    }
+
+    renderer.render(scene, captureCamera);
+    const dataUrl = captureCanvasDataUrl(renderer.domElement as HTMLCanvasElement);
+
+    gridHelper.visible = savedGridVisible;
+    state.selection = savedSelection;
+    state.previewDirty = true;
+    rebuildPreview();
+    controls.update();
+    renderer.render(scene, camera);
+
+    return dataUrl;
+  };
+
+  const captureMassingDataUrl = () => captureSceneWithCamera(camera);
+
+  const capturePerspectiveReferenceView = (position: THREE.Vector3, target: THREE.Vector3, fov = 34) => {
+    const referenceCamera = new THREE.PerspectiveCamera(fov, Math.max(previewWidth, 1) / Math.max(previewHeight, 1), 0.1, 180);
+    referenceCamera.position.copy(position);
+    referenceCamera.lookAt(target);
+    return captureSceneWithCamera(referenceCamera);
+  };
+
+  const captureOrthographicReferenceView = (position: THREE.Vector3, target: THREE.Vector3, verticalSpan: number) => {
+    const aspect = Math.max(previewWidth, 1) / Math.max(previewHeight, 1);
+    const halfHeight = Math.max(verticalSpan, 1) * 0.5;
+    const halfWidth = halfHeight * aspect;
+    const referenceCamera = new THREE.OrthographicCamera(-halfWidth, halfWidth, halfHeight, -halfHeight, 0.1, 220);
+    referenceCamera.position.copy(position);
+    referenceCamera.up.set(0, 1, 0);
+    referenceCamera.lookAt(target);
+    return captureSceneWithCamera(referenceCamera);
+  };
+
+  const buildPlanSvgMarkup = () => buildAiPlanSvgMarkup(true);
+
+  const createExteriorReferencePack = async () => {
+    const metrics = computeLayoutMetrics();
+    const planSvgMarkup = buildPlanSvgMarkup();
+    const planPngDataUrl = await rasterizePlanSvg(planSvgMarkup);
+    const currentPreviewDataUrl = captureMassingDataUrl();
+
+    const targetPoint = new THREE.Vector3(
+      metrics.centerX,
+      Math.max(metrics.maxHeight * 0.48, 1.35),
+      metrics.centerZ,
+    );
+    const maxSpan = Math.max(metrics.width, metrics.depth, metrics.maxHeight);
+    const heroDistance = Math.max(maxSpan * 1.25 + 3.5, 9.5);
+    const axonDistance = Math.max(maxSpan * 1.7 + 4.5, 12);
+    const elevationSpan = Math.max(metrics.maxHeight + 2.4, metrics.width + 2.6, metrics.depth + 2.6);
+
+    const southElevationDataUrl = captureOrthographicReferenceView(
+      new THREE.Vector3(metrics.centerX, targetPoint.y, metrics.centerZ + 80),
+      targetPoint,
+      elevationSpan,
+    );
+    const eastElevationDataUrl = captureOrthographicReferenceView(
+      new THREE.Vector3(metrics.centerX + 80, targetPoint.y, metrics.centerZ),
+      targetPoint,
+      elevationSpan,
+    );
+    const axonometricDataUrl = captureOrthographicReferenceView(
+      new THREE.Vector3(metrics.centerX + axonDistance, targetPoint.y + axonDistance * 0.7, metrics.centerZ + axonDistance),
+      targetPoint,
+      Math.max(maxSpan * 2.1, metrics.maxHeight * 2.4, 16),
+    );
+    const heroPreviewDataUrl = capturePerspectiveReferenceView(
+      new THREE.Vector3(metrics.centerX + heroDistance * 0.62, targetPoint.y + heroDistance * 0.28, metrics.centerZ + heroDistance),
+      targetPoint,
+      32,
+    );
+
+    return {
+      planPngDataUrl,
+      currentPreviewDataUrl,
+      southElevationDataUrl,
+      eastElevationDataUrl,
+      axonometricDataUrl,
+      heroPreviewDataUrl,
+      brief: createAiBrief(),
+      metrics,
+    };
+  };
+
+  const writeExteriorPackPopup = (
+    popup: Window,
+    pack: Awaited<ReturnType<typeof createExteriorReferencePack>>,
+  ) => {
+    popup.document.open();
+    popup.document.write(`
+      <!doctype html>
+      <html lang="en">
+        <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <title>House Lab Exterior AI Pack</title>
+          <style>
+            :root {
+              color-scheme: light;
+              font-family: "Space Grotesk", "Segoe UI", sans-serif;
+              background: #f4efe6;
+              color: #223043;
+            }
+
+            * { box-sizing: border-box; }
+
+            body {
+              margin: 0;
+              min-height: 100vh;
+              background:
+                radial-gradient(circle at top left, rgba(160, 198, 232, 0.18), transparent 34%),
+                linear-gradient(180deg, #faf7f0 0%, #f2ecdf 100%);
+            }
+
+            .shell {
+              width: min(1560px, calc(100% - 48px));
+              margin: 0 auto;
+              padding: 32px 0 40px;
+            }
+
+            .hero {
+              display: grid;
+              gap: 18px;
+              padding: 26px;
+              border-radius: 28px;
+              background: rgba(255, 255, 255, 0.72);
+              border: 1px solid rgba(102, 123, 148, 0.16);
+              box-shadow: 0 24px 56px rgba(32, 45, 62, 0.12);
+            }
+
+            h1 {
+              margin: 0;
+              font-size: clamp(2.4rem, 5vw, 4.2rem);
+              line-height: 0.92;
+              letter-spacing: -0.04em;
+            }
+
+            .hero p {
+              margin: 0;
+              max-width: 72ch;
+              color: #5b6b7f;
+            }
+
+            .metrics {
+              display: flex;
+              flex-wrap: wrap;
+              gap: 10px;
+            }
+
+            .metric {
+              padding: 8px 12px;
+              border-radius: 999px;
+              background: rgba(255, 255, 255, 0.82);
+              border: 1px solid rgba(102, 123, 148, 0.14);
+              color: #45556c;
+              font-size: 0.92rem;
+            }
+
+            .tips {
+              display: grid;
+              gap: 8px;
+              margin: 0;
+              padding-left: 18px;
+              color: #4c5b6f;
+            }
+
+            .grid {
+              display: grid;
+              grid-template-columns: repeat(2, minmax(0, 1fr));
+              gap: 18px;
+              margin-top: 18px;
+            }
+
+            .panel {
+              display: grid;
+              gap: 14px;
+              align-content: start;
+              padding: 22px;
+              border-radius: 26px;
+              background: rgba(255, 255, 255, 0.72);
+              border: 1px solid rgba(102, 123, 148, 0.16);
+              box-shadow: 0 24px 56px rgba(32, 45, 62, 0.12);
+            }
+
+            .panel.full {
+              grid-column: 1 / -1;
+            }
+
+            .panel strong {
+              color: #1b2737;
+              font-size: 1.05rem;
+            }
+
+            .panel span {
+              color: #5b6b7f;
+            }
+
+            .panel img {
+              display: block;
+              width: 100%;
+              height: auto;
+              border-radius: 22px;
+              border: 1px solid rgba(102, 123, 148, 0.14);
+              background: #fffdf8;
+            }
+
+            .upload-order {
+              display: grid;
+              gap: 8px;
+              margin: 0;
+              padding-left: 18px;
+              color: #445569;
+            }
+
+            pre {
+              margin: 0;
+              padding: 16px 18px;
+              overflow: auto;
+              border-radius: 18px;
+              border: 1px solid rgba(102, 123, 148, 0.14);
+              background: rgba(244, 239, 230, 0.88);
+              color: #334155;
+              font: 500 0.94rem/1.6 "JetBrains Mono", monospace;
+              white-space: pre-wrap;
+            }
+
+            @media (max-width: 980px) {
+              .grid {
+                grid-template-columns: 1fr;
+              }
+
+              .panel.full {
+                grid-column: auto;
+              }
+            }
+          </style>
+        </head>
+        <body>
+          <div class="shell">
+            <div class="hero">
+              <h1>House Lab Exterior AI Pack</h1>
+              <p>Use these images as separate uploads, not as one mixed reference. The plan and elevations should constrain the building; the inspiration house photo should only style it.</p>
+              <div class="metrics">
+                <div class="metric">Footprint: ${formatMeters(pack.metrics.width)} × ${formatMeters(pack.metrics.depth)}</div>
+                <div class="metric">Walls: ${pack.metrics.wallCount}</div>
+                <div class="metric">Rooms: ${pack.metrics.roomCount}</div>
+                <div class="metric">Wall heights: ${formatMeters(pack.metrics.minHeight)} to ${formatMeters(pack.metrics.maxHeight)}</div>
+              </div>
+              <ol class="tips">
+                <li>Upload each image separately instead of uploading one poster.</li>
+                <li>For exterior generation, use only exterior inspiration photos in the same request.</li>
+                <li>Top of plan = north, so the elevation labels stay consistent.</li>
+              </ol>
+            </div>
+            <div class="grid">
+              <section class="panel">
+                <div>
+                  <strong>1. Plan PNG</strong><br />
+                  <span>Primary footprint and room-layout guide. Top of plan = north.</span>
+                </div>
+                <img src="${pack.planPngDataUrl}" alt="Plan PNG" />
+              </section>
+              <section class="panel">
+                <div>
+                  <strong>2. South Elevation</strong><br />
+                  <span>Orthographic elevation from the south side of the plan.</span>
+                </div>
+                <img src="${pack.southElevationDataUrl}" alt="South elevation" />
+              </section>
+              <section class="panel">
+                <div>
+                  <strong>3. East Elevation</strong><br />
+                  <span>Orthographic elevation from the east side of the plan.</span>
+                </div>
+                <img src="${pack.eastElevationDataUrl}" alt="East elevation" />
+              </section>
+              <section class="panel">
+                <div>
+                  <strong>4. Axonometric Massing</strong><br />
+                  <span>Best for the overall roof and building-form read.</span>
+                </div>
+                <img src="${pack.axonometricDataUrl}" alt="Axonometric massing" />
+              </section>
+              <section class="panel">
+                <div>
+                  <strong>5. Current Framed Preview</strong><br />
+                  <span>This is your live preview angle, cleaned up without selection highlights or the grid.</span>
+                </div>
+                <img src="${pack.currentPreviewDataUrl}" alt="Current framed preview" />
+              </section>
+              <section class="panel">
+                <div>
+                  <strong>6. Hero Exterior View</strong><br />
+                  <span>Use this as a clearer three-quarter reference if the live preview is too loose.</span>
+                </div>
+                <img src="${pack.heroPreviewDataUrl}" alt="Hero exterior view" />
+              </section>
+              <section class="panel full">
+                <div>
+                  <strong>Recommended Upload Order</strong><br />
+                  <span>Upload these first, then add a single strong exterior inspiration photo last.</span>
+                </div>
+                <ol class="upload-order">
+                  <li>Plan PNG</li>
+                  <li>South elevation</li>
+                  <li>East elevation</li>
+                  <li>Axonometric massing</li>
+                  <li>Current framed preview or Hero exterior view</li>
+                  <li>One exterior inspiration house photo</li>
+                </ol>
+              </section>
+              <section class="panel full">
+                <div>
+                  <strong>Strict Exterior Prompt</strong><br />
+                  <span>Paste this into the image model with the reference images above.</span>
+                </div>
+                <pre>${escapeHtml(pack.brief)}</pre>
+              </section>
+            </div>
+          </div>
+        </body>
+      </html>
+    `);
+    popup.document.close();
+  };
+
   const syncToolButtons = () => {
     toolButtons.forEach((button) => {
       button.classList.toggle("is-active", button.dataset.houseTool === state.tool);
@@ -1394,6 +2185,7 @@ export async function mountHouseLab(target: HTMLElement, options: HouseLabOption
     state.planDirty = true;
     state.previewDirty = true;
     syncProperties();
+    syncExportAvailability();
   };
 
   const requestPlanRefresh = () => {
@@ -2454,6 +3246,178 @@ export async function mountHouseLab(target: HTMLElement, options: HouseLabOption
   deleteButton.addEventListener("click", deleteSelected);
   resetButton.addEventListener("click", resetLayout);
 
+  exportButtons.forEach((button) => {
+    button.addEventListener("click", async () => {
+      const exportKind = button.dataset.houseExport;
+
+      if (!exportKind || exportBusy || !hasLayoutContent()) {
+        syncExportAvailability();
+        return;
+      }
+
+      const popupTitle =
+        exportKind === "plan"
+          ? "House Lab Plan Export"
+          : exportKind === "massing"
+            ? "House Lab Massing Export"
+            : exportKind === "pack"
+              ? "House Lab Exterior AI Pack"
+              : "House Lab Strict Exterior Brief";
+
+      const popup = exportKind === "brief" ? null : createExportPopup(popupTitle);
+
+      if (exportKind !== "brief" && !popup) {
+        setExportStatus("Allow pop-ups for this site so House Lab can open the export references in a new tab.", "error");
+        return;
+      }
+
+      exportBusy = true;
+      syncExportAvailability();
+      setExportStatus(
+        exportKind === "brief"
+          ? "Preparing the strict exterior brief..."
+          : `Preparing the ${popupTitle.toLowerCase()}...`,
+        "busy",
+      );
+
+      try {
+        const planSvgMarkup = buildPlanSvgMarkup();
+
+        if (exportKind === "plan") {
+          const planPngDataUrl = await rasterizePlanSvg(planSvgMarkup);
+          writeImagePopup(
+            popup!,
+            popupTitle,
+            planPngDataUrl,
+            "Use this as the authoritative layout guide. It is cleaner than the editor view and includes the plan orientation marker.",
+          );
+          setExportStatus("Opened the clean plan PNG in a new tab.", "success");
+          return;
+        }
+
+        if (exportKind === "massing") {
+          const massingDataUrl = captureMassingDataUrl();
+          writeImagePopup(
+            popup!,
+            popupTitle,
+            massingDataUrl,
+            "Use this as the proportion and overall house-form reference. Frame the preview first, then export the shot you want.",
+          );
+          setExportStatus("Opened the cleaned massing export in a new tab.", "success");
+          return;
+        }
+
+        const brief = createAiBrief();
+
+        if (exportKind === "pack") {
+          const pack = await createExteriorReferencePack();
+          writeExteriorPackPopup(popup!, pack);
+          setExportStatus("Opened the exterior AI pack in a new tab.", "success");
+          return;
+        }
+
+        try {
+          await navigator.clipboard.writeText(brief);
+          setExportStatus("Copied the strict exterior brief to your clipboard.", "success");
+        } catch {
+          const briefPopup = createExportPopup(popupTitle);
+
+          if (!briefPopup) {
+            throw new Error("Clipboard access was blocked, and the fallback brief window could not be opened.");
+          }
+
+          briefPopup.document.open();
+          briefPopup.document.write(`
+            <!doctype html>
+            <html lang="en">
+              <head>
+                <meta charset="utf-8" />
+                <meta name="viewport" content="width=device-width, initial-scale=1" />
+                <title>${escapeHtml(popupTitle)}</title>
+                <style>
+                  :root {
+                    color-scheme: light;
+                    font-family: "Space Grotesk", "Segoe UI", sans-serif;
+                    background: #f3ede2;
+                    color: #223043;
+                  }
+
+                  * { box-sizing: border-box; }
+
+                  body {
+                    margin: 0;
+                    min-height: 100vh;
+                    background:
+                      radial-gradient(circle at top left, rgba(160, 198, 232, 0.18), transparent 34%),
+                      linear-gradient(180deg, #faf7f0 0%, #f2ecdf 100%);
+                  }
+
+                  .shell {
+                    width: min(1100px, calc(100% - 48px));
+                    margin: 0 auto;
+                    padding: 32px 0 40px;
+                  }
+
+                  .card {
+                    padding: 24px;
+                    border-radius: 28px;
+                    background: rgba(255, 255, 255, 0.72);
+                    border: 1px solid rgba(102, 123, 148, 0.16);
+                    box-shadow: 0 24px 56px rgba(32, 45, 62, 0.12);
+                  }
+
+                  h1 {
+                    margin: 0 0 8px;
+                    font-size: clamp(2rem, 4vw, 3rem);
+                    line-height: 0.96;
+                  }
+
+                  p {
+                    margin: 0 0 18px;
+                    max-width: 60ch;
+                    color: #5b6b7f;
+                  }
+
+                  pre {
+                    margin: 0;
+                    padding: 16px 18px;
+                    overflow: auto;
+                    border-radius: 18px;
+                    border: 1px solid rgba(102, 123, 148, 0.14);
+                    background: rgba(244, 239, 230, 0.88);
+                    color: #334155;
+                    font: 500 0.94rem/1.6 "JetBrains Mono", monospace;
+                    white-space: pre-wrap;
+                  }
+                </style>
+              </head>
+              <body>
+                <div class="shell">
+                  <div class="card">
+                    <h1>${escapeHtml(popupTitle)}</h1>
+                    <p>Clipboard access was blocked, so House Lab opened the strict exterior brief here instead.</p>
+                    <pre>${escapeHtml(brief)}</pre>
+                  </div>
+                </div>
+              </body>
+            </html>
+          `);
+          briefPopup.document.close();
+          setExportStatus("Clipboard was blocked, so the strict exterior brief was opened in a new tab instead.", "success");
+        }
+      } catch (error) {
+        popup?.close();
+        setExportStatus(
+          error instanceof Error ? error.message : "House Lab could not prepare the export bundle.",
+          "error",
+        );
+      } finally {
+        exportBusy = false;
+        syncExportAvailability();
+      }
+    });
+  });
+
   fieldInputs.label!.addEventListener("input", () => {
     if (selectedRoom()) {
       updateSelectedRoom((room) => {
@@ -2579,6 +3543,7 @@ export async function mountHouseLab(target: HTMLElement, options: HouseLabOption
 
   syncToolButtons();
   syncProperties();
+  syncExportAvailability();
   renderPlan();
   rebuildPreview();
 

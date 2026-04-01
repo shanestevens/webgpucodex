@@ -2,3 +2,6 @@ node_modules/
 dist/
 .idea/
 npm-debug.log*
+dev.stdout.log
+dev.stderr.log
+tmp/

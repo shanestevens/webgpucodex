@@ -7,8 +7,10 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import GUI from "three/addons/libs/lil-gui.module.min.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { STLLoader } from "three/addons/loaders/STLLoader.js";
 import { SimplexNoise } from "three/addons/math/SimplexNoise.js";
-import { Fn, color, cos, instanceIndex, instancedArray, localId, mix, normalLocal, positionLocal, sin, textureStore, time, uniform, uvec2, uv, vec3, vec4, workgroupId } from "three/tsl";
+import { mergeVertices } from "three/addons/utils/BufferGeometryUtils.js";
+import { Fn, color, cos, instanceIndex, instancedArray, localId, mix, normalLocal, positionLocal, sin, textureStore, time, uvec2, uniform, uv, vec3, vec4, workgroupId } from "three/tsl";
 
 type CameraMode = "orbit" | "fps";
 type AppTab = "gallery" | "house";
@@ -72,6 +74,8 @@ type MountedExample = ExampleRuntime & {
   fpsSmoothed: number;
   failed: boolean;
   sizeDirty: boolean;
+  isActive: boolean;
+  isVisible: boolean;
   viewportWidth: number;
   viewportHeight: number;
   syncSize: () => void;
@@ -79,6 +83,7 @@ type MountedExample = ExampleRuntime & {
 
 const FALLBACK_RENDERER_BUDGET = 4;
 const FALLBACK_PREWARM_MARGIN = 420;
+const ACTIVE_VIEWPORT_MARGIN = 320;
 
 const app = document.querySelector<HTMLDivElement>("#app");
 
@@ -136,7 +141,18 @@ function createUvReferenceTexture(): THREE.CanvasTexture {
   return texture;
 }
 
-function createLookdevFloorTexture(): THREE.CanvasTexture {
+type LookdevFloorPalette = {
+  base: string;
+  majorEven: string;
+  majorOdd: string;
+  minorEven: string;
+  minorOdd: string;
+  grid: string;
+  minorAlpha: number;
+  gridAlpha: number;
+};
+
+function createLookdevFloorTexture(overrides: Partial<LookdevFloorPalette> = {}): THREE.CanvasTexture {
   const canvas = document.createElement("canvas");
   canvas.width = 512;
   canvas.height = 512;
@@ -147,7 +163,19 @@ function createLookdevFloorTexture(): THREE.CanvasTexture {
     throw new Error("Could not create 2D canvas context");
   }
 
-  context.fillStyle = "#616a7a";
+  const palette: LookdevFloorPalette = {
+    base: "#616a7a",
+    majorEven: "#5d6676",
+    majorOdd: "#505969",
+    minorEven: "#818b9a",
+    minorOdd: "#465061",
+    grid: "#c7cfda",
+    minorAlpha: 0.18,
+    gridAlpha: 0.1,
+    ...overrides,
+  };
+
+  context.fillStyle = palette.base;
   context.fillRect(0, 0, canvas.width, canvas.height);
 
   const majorStep = 64;
@@ -156,22 +184,22 @@ function createLookdevFloorTexture(): THREE.CanvasTexture {
   for (let y = 0; y < canvas.height; y += majorStep) {
     for (let x = 0; x < canvas.width; x += majorStep) {
       const parity = (x / majorStep + y / majorStep) % 2;
-      context.fillStyle = parity === 0 ? "#5d6676" : "#505969";
+      context.fillStyle = parity === 0 ? palette.majorEven : palette.majorOdd;
       context.fillRect(x, y, majorStep, majorStep);
     }
   }
 
-  context.globalAlpha = 0.18;
+  context.globalAlpha = palette.minorAlpha;
   for (let y = 0; y < canvas.height; y += minorStep) {
     for (let x = 0; x < canvas.width; x += minorStep) {
       const parity = (x / minorStep + y / minorStep) % 2;
-      context.fillStyle = parity === 0 ? "#818b9a" : "#465061";
+      context.fillStyle = parity === 0 ? palette.minorEven : palette.minorOdd;
       context.fillRect(x, y, minorStep, minorStep);
     }
   }
 
-  context.globalAlpha = 0.1;
-  context.strokeStyle = "#c7cfda";
+  context.globalAlpha = palette.gridAlpha;
+  context.strokeStyle = palette.grid;
   context.lineWidth = 2;
 
   for (let x = 0; x <= canvas.width; x += majorStep) {
@@ -196,6 +224,267 @@ function createLookdevFloorTexture(): THREE.CanvasTexture {
   texture.wrapT = THREE.RepeatWrapping;
   texture.anisotropy = 8;
   return texture;
+}
+
+function applySphericalUvs(
+  geometry: THREE.BufferGeometry,
+  center = new THREE.Vector3(),
+): void {
+  const positions = geometry.getAttribute("position");
+  const uvs = new Float32Array(positions.count * 2);
+  const point = new THREE.Vector3();
+
+  for (let index = 0; index < positions.count; index += 1) {
+    point.fromBufferAttribute(positions, index).sub(center);
+
+    const radius = Math.max(point.length(), 1e-6);
+    const x = point.x / radius;
+    const y = THREE.MathUtils.clamp(point.y / radius, -1, 1);
+    const z = point.z / radius;
+    const u = Math.atan2(z, x) / (Math.PI * 2) + 0.5;
+    const v = Math.acos(y) / Math.PI;
+
+    uvs[index * 2] = u;
+    uvs[index * 2 + 1] = v;
+  }
+
+  geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+}
+
+function applyCylindricalUvs(
+  geometry: THREE.BufferGeometry,
+  center = new THREE.Vector3(),
+): void {
+  geometry.computeBoundingBox();
+  const bounds = geometry.boundingBox;
+
+  if (!bounds) {
+    return;
+  }
+
+  const positions = geometry.getAttribute("position");
+  const uvs = new Float32Array(positions.count * 2);
+  const point = new THREE.Vector3();
+  const minZ = bounds.min.z;
+  const maxZ = bounds.max.z;
+  const height = Math.max(maxZ - minZ, 1e-6);
+
+  for (let index = 0; index < positions.count; index += 1) {
+    point.fromBufferAttribute(positions, index);
+
+    const u = Math.atan2(point.y - center.y, point.x - center.x) / (Math.PI * 2) + 0.5;
+    const v = (point.z - minZ) / height;
+
+    uvs[index * 2] = u;
+    uvs[index * 2 + 1] = v;
+  }
+
+  geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+}
+
+function prepareShaderBallPartGeometry(
+  source: THREE.BufferGeometry,
+  uvProjector?: (geometry: THREE.BufferGeometry) => void,
+): THREE.BufferGeometry {
+  const merged = mergeVertices(source, 1e-4);
+  merged.computeVertexNormals();
+
+  const prepared = merged.toNonIndexed();
+  uvProjector?.(prepared);
+
+  return prepared;
+}
+
+type ScannedPbrAssetKey = "Marble 01" | "Metal Plate" | "Wood Floor";
+
+type ScannedPbrAssetDefinition = {
+  label: ScannedPbrAssetKey;
+  folder: string;
+  accent: string;
+  repeat: [number, number];
+  middlePreviewLabel: string;
+  normalScale: number;
+  defaults: THREE.MeshPhysicalMaterialParameters;
+  packedArm?: boolean;
+};
+
+type LoadedScannedPbrSet = {
+  definition: ScannedPbrAssetDefinition;
+  diffuse: THREE.Texture;
+  roughness: THREE.Texture | null;
+  arm: THREE.Texture | null;
+  normal: THREE.Texture;
+  textures: THREE.Texture[];
+};
+
+const SCANNED_PBR_ASSETS: Record<ScannedPbrAssetKey, ScannedPbrAssetDefinition> = {
+  "Marble 01": {
+    label: "Marble 01",
+    folder: "materials/marble_01",
+    accent: "#c7ae8f",
+    repeat: [1.4, 1.4],
+    middlePreviewLabel: "Roughness",
+    normalScale: 0.74,
+    defaults: {
+      color: "#ded7ce",
+      roughness: 0.24,
+      metalness: 0,
+      clearcoat: 0.42,
+      clearcoatRoughness: 0.09,
+    },
+  },
+  "Metal Plate": {
+    label: "Metal Plate",
+    folder: "materials/metal_plate",
+    accent: "#7ec1b6",
+    repeat: [2.1, 2.1],
+    middlePreviewLabel: "ARM",
+    normalScale: 0.72,
+    packedArm: true,
+    defaults: {
+      color: "#718187",
+      roughness: 0.72,
+      metalness: 0.92,
+    },
+  },
+  "Wood Floor": {
+    label: "Wood Floor",
+    folder: "materials/wood_floor",
+    accent: "#d29a68",
+    repeat: [3.2, 2.4],
+    middlePreviewLabel: "Roughness",
+    normalScale: 0.82,
+    defaults: {
+      color: "#a67d5a",
+      roughness: 0.7,
+      metalness: 0.03,
+      clearcoat: 0.12,
+      clearcoatRoughness: 0.28,
+    },
+  },
+};
+
+function createMaterialTagTexture(
+  text: string,
+  accent: string,
+  trackedTextures: THREE.Texture[],
+  width = 640,
+  height = 160,
+): THREE.CanvasTexture {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+
+  const context = canvas.getContext("2d");
+
+  if (!context) {
+    throw new Error("Could not create 2D canvas context");
+  }
+
+  context.fillStyle = "rgba(15, 24, 35, 0.92)";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.strokeStyle = accent;
+  context.lineWidth = 5;
+  context.strokeRect(2.5, 2.5, canvas.width - 5, canvas.height - 5);
+  context.fillStyle = accent;
+  context.font = "600 28px Segoe UI, sans-serif";
+  context.textAlign = "center";
+  context.fillText(text, canvas.width / 2, Math.round(canvas.height * 0.6));
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  trackedTextures.push(texture);
+  return texture;
+}
+
+function clonePreviewTexture(source: THREE.Texture, trackedTextures: THREE.Texture[]): THREE.Texture {
+  const preview = source.clone();
+  preview.wrapS = THREE.ClampToEdgeWrapping;
+  preview.wrapT = THREE.ClampToEdgeWrapping;
+  preview.repeat.set(1, 1);
+  preview.offset.set(0, 0);
+  preview.needsUpdate = true;
+  trackedTextures.push(preview);
+  return preview;
+}
+
+async function loadScannedPbrSet(
+  key: ScannedPbrAssetKey,
+  loader: THREE.TextureLoader,
+  trackedTextures: THREE.Texture[],
+): Promise<LoadedScannedPbrSet> {
+  const definition = SCANNED_PBR_ASSETS[key];
+  const basePath = `${import.meta.env.BASE_URL}${definition.folder}`;
+
+  const loadTexture = async (filename: string, colorSpace?: THREE.ColorSpace) => {
+    const texture = await loader.loadAsync(`${basePath}/${filename}`);
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.anisotropy = 8;
+
+    if (colorSpace) {
+      texture.colorSpace = colorSpace;
+    }
+
+    trackedTextures.push(texture);
+    return texture;
+  };
+
+  const diffuse = await loadTexture("diffuse.jpg", THREE.SRGBColorSpace);
+  const normal = await loadTexture("normal.jpg");
+  const roughness = definition.packedArm ? null : await loadTexture("roughness.jpg");
+  const arm = definition.packedArm ? await loadTexture("arm.jpg") : null;
+
+  return {
+    definition,
+    diffuse,
+    roughness,
+    arm,
+    normal,
+    textures: [diffuse, normal, ...(roughness ? [roughness] : []), ...(arm ? [arm] : [])],
+  };
+}
+
+function applyScannedPbrSet(
+  material: THREE.MeshPhysicalMaterial,
+  set: LoadedScannedPbrSet,
+  options?: {
+    albedo?: boolean;
+    roughness?: boolean;
+    normal?: boolean;
+    metalness?: boolean;
+  },
+): void {
+  const { defaults } = set.definition;
+
+  material.color.set(defaults.color ?? "#ffffff");
+  material.roughness = typeof defaults.roughness === "number" ? defaults.roughness : 0.5;
+  material.metalness = typeof defaults.metalness === "number" ? defaults.metalness : 0;
+  material.clearcoat = typeof defaults.clearcoat === "number" ? defaults.clearcoat : 0;
+  material.clearcoatRoughness =
+    typeof defaults.clearcoatRoughness === "number" ? defaults.clearcoatRoughness : 0;
+  material.map = options?.albedo === false ? null : set.diffuse;
+  material.normalMap = options?.normal === false ? null : set.normal;
+  material.normalScale.setScalar(set.definition.normalScale);
+
+  if (set.arm) {
+    material.roughnessMap = options?.roughness === false ? null : set.arm;
+    material.metalnessMap = options?.metalness === false ? null : set.arm;
+  } else {
+    material.roughnessMap = options?.roughness === false ? null : set.roughness;
+    material.metalnessMap = null;
+  }
+
+  material.needsUpdate = true;
+}
+
+function setScannedPbrRepeat(set: LoadedScannedPbrSet, scale: number): void {
+  const repeatX = set.definition.repeat[0] * scale;
+  const repeatY = set.definition.repeat[1] * scale;
+
+  for (const texture of set.textures) {
+    texture.repeat.set(repeatX, repeatY);
+  }
 }
 
 function createOrbitLine(radius: number, colorValue: string): THREE.Line {
@@ -1508,7 +1797,7 @@ const examples: ExampleDefinition[] = [
       } as const;
 
       const state = {
-        preset: "balanced" as keyof typeof lightPresets,
+        preset: "full" as keyof typeof lightPresets,
         ambient: ambient.intensity,
         hemisphere: hemi.intensity,
         directional: directional.intensity,
@@ -1859,13 +2148,25 @@ const examples: ExampleDefinition[] = [
     cameraPosition: [-1.8, 5.4, 12.2],
     target: [0, 1.1, -0.2],
     create: ({ scene, renderer }) => {
-      scene.background = new THREE.Color("#c6cdd7");
-      scene.fog = new THREE.Fog("#c6cdd7", 18, 34);
       renderer.toneMappingExposure = 0.95;
-      const lookdevFloorTexture = createLookdevFloorTexture();
-      lookdevFloorTexture.repeat.set(3.5, 2.5);
+      const lookdevFloorTextures = {
+        Light: createLookdevFloorTexture(),
+        Dark: createLookdevFloorTexture({
+          base: "#253041",
+          majorEven: "#212b3b",
+          majorOdd: "#1a2331",
+          minorEven: "#314056",
+          minorOdd: "#16202d",
+          grid: "#9fb4cf",
+          minorAlpha: 0.14,
+          gridAlpha: 0.08,
+        }),
+      } as const;
+      lookdevFloorTextures.Light.repeat.set(3.5, 2.5);
+      lookdevFloorTextures.Dark.repeat.set(3.5, 2.5);
 
       const studioState = {
+        theme: "Dark" as "Light" | "Dark",
         envIntensity: 0.62,
         exposure: 0.95,
         keyIntensity: 1.18,
@@ -1922,7 +2223,7 @@ const examples: ExampleDefinition[] = [
         new THREE.PlaneGeometry(14.9, 10.1),
         createPhysicalMaterial({
           color: "#b7c0cb",
-          map: lookdevFloorTexture,
+          map: lookdevFloorTextures.Light,
           roughness: 0.94,
           metalness: 0.02,
           clearcoat: 0.02,
@@ -1932,6 +2233,17 @@ const examples: ExampleDefinition[] = [
       stageTop.rotation.x = -Math.PI / 2;
       stageTop.position.y = -0.02;
       stageTop.receiveShadow = true;
+
+      const shadowCatcher = new THREE.Mesh(
+        new THREE.PlaneGeometry(14.9, 10.1),
+        new THREE.ShadowMaterial({
+          color: "#243242",
+          opacity: 0.26,
+        }),
+      );
+      shadowCatcher.rotation.x = -Math.PI / 2;
+      shadowCatcher.position.y = -0.015;
+      shadowCatcher.receiveShadow = true;
 
       const shadowFocus = new THREE.Object3D();
       shadowFocus.position.set(0.2, 0.34, -1.2);
@@ -1945,18 +2257,19 @@ const examples: ExampleDefinition[] = [
       key.shadow.camera.right = 10;
       key.shadow.camera.top = 10;
       key.shadow.camera.bottom = -10;
-      key.shadow.bias = -0.00012;
-      key.shadow.normalBias = 0.1;
+      key.shadow.bias = -0.00008;
+      key.shadow.normalBias = 0.02;
 
       const shadowSpot = new THREE.SpotLight("#fff4dc", studioState.keyIntensity * 7.5, 28, Math.PI / 5, 0.34, 1.1);
       shadowSpot.position.set(-5.4, 7.8, -3.8);
       shadowSpot.target = shadowFocus;
       shadowSpot.castShadow = true;
       shadowSpot.shadow.mapSize.set(2048, 2048);
-      shadowSpot.shadow.bias = -0.00018;
-      shadowSpot.shadow.normalBias = 0.08;
+      shadowSpot.shadow.bias = -0.00008;
+      shadowSpot.shadow.normalBias = 0.015;
       shadowSpot.shadow.camera.near = 1;
       shadowSpot.shadow.camera.far = 26;
+      shadowSpot.shadow.focus = 1;
 
       const fill = new THREE.HemisphereLight("#c1d9ff", "#66758f", studioState.fillIntensity);
       const rim = new THREE.DirectionalLight("#c7d7ff", studioState.rimIntensity);
@@ -1972,7 +2285,7 @@ const examples: ExampleDefinition[] = [
       accent.add(accentMarker);
       accentRig.add(accent);
 
-      scene.add(stage, stageTop, shadowFocus, key, shadowSpot, fill, rim, accentRig);
+      scene.add(stage, stageTop, shadowCatcher, shadowFocus, key, shadowSpot, fill, rim, accentRig);
 
       const sphereGeometry = new THREE.SphereGeometry(0.56, 48, 32);
       const capsuleGeometry = new THREE.CapsuleGeometry(0.34, 1.24, 6, 18);
@@ -2175,6 +2488,40 @@ const examples: ExampleDefinition[] = [
 
       scene.add(props);
 
+      const syncTheme = () => {
+        if (studioState.theme === "Dark") {
+          scene.background = new THREE.Color("#0b1119");
+          scene.fog = new THREE.Fog("#0b1119", 16, 30);
+          stage.material.color.set("#171e2a");
+          stageTop.material.color.set("#2a3342");
+          stageTop.material.map = lookdevFloorTextures.Dark;
+          stageTop.material.needsUpdate = true;
+          (shadowCatcher.material as THREE.ShadowMaterial).color.set("#02070d");
+          (shadowCatcher.material as THREE.ShadowMaterial).opacity = 0.46;
+          key.color.set("#fff1db");
+          fill.color.set("#8ba8ca");
+          fill.groundColor.set("#121b28");
+          rim.color.set("#c9ddff");
+          accent.color.set("#ffc796");
+          (accentMarker.material as THREE.MeshBasicMaterial).color.set("#ffe6c4");
+        } else {
+          scene.background = new THREE.Color("#c6cdd7");
+          scene.fog = new THREE.Fog("#c6cdd7", 18, 34);
+          stage.material.color.set("#4f5867");
+          stageTop.material.color.set("#b7c0cb");
+          stageTop.material.map = lookdevFloorTextures.Light;
+          stageTop.material.needsUpdate = true;
+          (shadowCatcher.material as THREE.ShadowMaterial).color.set("#243242");
+          (shadowCatcher.material as THREE.ShadowMaterial).opacity = 0.26;
+          key.color.set("#fff7ec");
+          fill.color.set("#c1d9ff");
+          fill.groundColor.set("#66758f");
+          rim.color.set("#c7d7ff");
+          accent.color.set("#ffd9b7");
+          (accentMarker.material as THREE.MeshBasicMaterial).color.set("#fff0d9");
+        }
+      };
+
       const syncLookdev = () => {
         renderer.toneMappingExposure = studioState.exposure;
         key.intensity = studioState.keyIntensity;
@@ -2199,6 +2546,7 @@ const examples: ExampleDefinition[] = [
         props.visible = studioState.showProps;
       };
 
+      syncTheme();
       syncLookdev();
       syncVisibility();
 
@@ -2217,6 +2565,10 @@ const examples: ExampleDefinition[] = [
         },
         setupGui: ({ gui }) => {
           const lookdevFolder = gui.addFolder("PBR lab");
+          lookdevFolder
+            .add(studioState, "theme", ["Light", "Dark"])
+            .name("theme")
+            .onChange(syncTheme);
           lookdevFolder
             .add(studioState, "envIntensity", 0, 2.8, 0.05)
             .name("env intensity")
@@ -2256,11 +2608,13 @@ const examples: ExampleDefinition[] = [
           roomEnvironment.dispose();
           environmentTarget.dispose();
           pmremGenerator.dispose();
-          lookdevFloorTexture.dispose();
+          lookdevFloorTextures.Light.dispose();
+          lookdevFloorTextures.Dark.dispose();
           sphereGeometry.dispose();
           capsuleGeometry.dispose();
           stage.geometry.dispose();
           stageTop.geometry.dispose();
+          shadowCatcher.geometry.dispose();
           accentMarker.geometry.dispose();
           disposeSceneResources([shadowFocus]);
 
@@ -2268,7 +2622,1462 @@ const examples: ExampleDefinition[] = [
             material.dispose();
           }
 
+          (shadowCatcher.material as THREE.Material).dispose();
           (accentMarker.material as THREE.Material).dispose();
+        },
+      };
+    },
+  },
+  {
+    step: "Step 04D",
+    title: "Scanned Material Bench",
+    summary: "Lay out real scanned materials on a proper shader-ball style board so you can compare production asset stacks under one studio rig instead of looking at isolated hero stations.",
+    notes:
+      "This is the real-material sibling to the synthetic lookdev board. The geometry stays consistent while the finishes shift from satin marble to buffed plate metal and clearcoated wood, so the texture sets become the star of the comparison.",
+    tags: ["Poly Haven CC0", "Scanned materials", "Shader-ball board", "Texture stacks"],
+    cameraPosition: [-1.2, 5.6, 12.4],
+    target: [0, 1.05, -0.2],
+    create: ({ scene, renderer }) => {
+      renderer.toneMappingExposure = 0.9;
+
+      const benchState = {
+        theme: "Dark" as "Light" | "Dark",
+        isolate: "All",
+        showLabels: true,
+        textureScale: 1,
+        envIntensity: 0.74,
+        exposure: 0.9,
+        keyIntensity: 1.06,
+        fillIntensity: 0.07,
+        rimIntensity: 0.44,
+        accentIntensity: 5.5,
+        animateLight: false,
+        turntable: false,
+      };
+
+      const trackedMaterials: THREE.Material[] = [];
+      const trackedTextures: THREE.Texture[] = [];
+      const trackedGeometries: THREE.BufferGeometry[] = [];
+      const loadedSets = new Map<ScannedPbrAssetKey, LoadedScannedPbrSet>();
+      let disposed = false;
+
+      const registerMaterial = <T extends THREE.Material>(material: T): T => {
+        trackedMaterials.push(material);
+        const envMaterial = material as THREE.Material & { envMapIntensity?: number };
+
+        if (typeof envMaterial.envMapIntensity === "number") {
+          envMaterial.envMapIntensity = benchState.envIntensity;
+        }
+
+        return material;
+      };
+
+      const registerGeometry = <T extends THREE.BufferGeometry>(geometry: T): T => {
+        trackedGeometries.push(geometry);
+        return geometry;
+      };
+
+      const createPhysicalMaterial = (parameters: THREE.MeshPhysicalMaterialParameters) =>
+        registerMaterial(new THREE.MeshPhysicalMaterial(parameters));
+
+      const roomEnvironment = new RoomEnvironment();
+      const pmremGenerator = new THREE.PMREMGenerator(renderer);
+      const environmentTarget = pmremGenerator.fromScene(roomEnvironment, 0.03);
+      scene.environment = environmentTarget.texture;
+
+      const lookdevFloorTextures = {
+        Light: createLookdevFloorTexture(),
+        Dark: createLookdevFloorTexture({
+          base: "#242e3e",
+          majorEven: "#202a39",
+          majorOdd: "#18212f",
+          minorEven: "#2d3a4f",
+          minorOdd: "#141d29",
+          grid: "#9eb0ca",
+          minorAlpha: 0.12,
+          gridAlpha: 0.07,
+        }),
+      } as const;
+      trackedTextures.push(lookdevFloorTextures.Light, lookdevFloorTextures.Dark);
+      lookdevFloorTextures.Light.repeat.set(3.5, 2.5);
+      lookdevFloorTextures.Dark.repeat.set(3.5, 2.5);
+
+      const stageBase = new THREE.Mesh(
+        registerGeometry(new THREE.BoxGeometry(15.4, 0.34, 10.6)),
+        createPhysicalMaterial({
+          color: "#4f5867",
+          roughness: 0.88,
+          metalness: 0.03,
+          clearcoat: 0.1,
+          clearcoatRoughness: 0.48,
+        }),
+      );
+      stageBase.position.y = -0.2;
+      stageBase.receiveShadow = true;
+
+      const stageTopMaterial = createPhysicalMaterial({
+        color: "#b7c0cb",
+        map: lookdevFloorTextures.Light,
+        roughness: 0.94,
+        metalness: 0.02,
+        clearcoat: 0.02,
+        clearcoatRoughness: 0.56,
+      });
+      const stageTop = new THREE.Mesh(registerGeometry(new THREE.PlaneGeometry(14.9, 10.1)), stageTopMaterial);
+      stageTop.rotation.x = -Math.PI / 2;
+      stageTop.position.y = -0.02;
+      stageTop.receiveShadow = true;
+
+      const shadowCatcher = new THREE.Mesh(
+        registerGeometry(new THREE.PlaneGeometry(14.9, 10.1)),
+        registerMaterial(
+          new THREE.ShadowMaterial({
+            color: "#243242",
+            opacity: 0.26,
+          }),
+        ),
+      );
+      shadowCatcher.rotation.x = -Math.PI / 2;
+      shadowCatcher.position.y = -0.015;
+      shadowCatcher.receiveShadow = true;
+
+      const backdrop = new THREE.Mesh(
+        registerGeometry(new THREE.PlaneGeometry(16.6, 5.8)),
+        createPhysicalMaterial({
+          color: "#c6ced8",
+          roughness: 0.96,
+          metalness: 0.02,
+        }),
+      );
+      backdrop.position.set(0, 3.1, -5.2);
+
+      const sideWingLeft = new THREE.Mesh(
+        registerGeometry(new THREE.BoxGeometry(0.32, 5.2, 3.6)),
+        createPhysicalMaterial({
+          color: "#aeb9c7",
+          roughness: 0.9,
+          metalness: 0.04,
+        }),
+      );
+      sideWingLeft.position.set(-7.65, 2.4, -3.2);
+      sideWingLeft.rotation.y = 0.16;
+
+      const sideWingRight = new THREE.Mesh(
+        registerGeometry(new THREE.BoxGeometry(0.32, 5.4, 3.8)),
+        createPhysicalMaterial({
+          color: "#b7c1ce",
+          roughness: 0.9,
+          metalness: 0.03,
+        }),
+      );
+      sideWingRight.position.set(7.7, 2.45, -3.3);
+      sideWingRight.rotation.y = -0.18;
+
+      const shadowFocus = new THREE.Object3D();
+      shadowFocus.position.set(0.2, 0.34, -1.2);
+
+      const key = new THREE.DirectionalLight("#fff7eb", benchState.keyIntensity);
+      key.position.set(6.9, 9, -6.1);
+      key.target = shadowFocus;
+      key.castShadow = true;
+      key.shadow.mapSize.set(2048, 2048);
+      key.shadow.camera.left = -10;
+      key.shadow.camera.right = 10;
+      key.shadow.camera.top = 10;
+      key.shadow.camera.bottom = -10;
+      key.shadow.bias = -0.00008;
+      key.shadow.normalBias = 0.02;
+
+      const fill = new THREE.HemisphereLight("#bccfe5", "#617087", benchState.fillIntensity);
+      const rim = new THREE.DirectionalLight("#d9e6ff", benchState.rimIntensity);
+      rim.position.set(-4.6, 5.8, 6.4);
+
+      const accentRig = new THREE.Group();
+      const accent = new THREE.PointLight("#ffd6b0", benchState.accentIntensity, 16, 2);
+      accent.position.set(0, 4.2, 2.5);
+      const accentMarker = new THREE.Mesh(
+        registerGeometry(new THREE.SphereGeometry(0.08, 16, 16)),
+        registerMaterial(new THREE.MeshBasicMaterial({ color: "#fff2df" })),
+      );
+      accent.add(accentMarker);
+      accentRig.add(accent);
+
+      scene.add(stageBase, stageTop, shadowCatcher, backdrop, sideWingLeft, sideWingRight, shadowFocus, key, fill, rim, accentRig);
+
+      const coreMaterial = createPhysicalMaterial({
+        color: "#f1f4f7",
+        roughness: 0.78,
+        metalness: 0.01,
+      });
+      const tagGeometry = registerGeometry(new THREE.PlaneGeometry(1.56, 0.34));
+
+      const createHeroTag = (text: string, accentColor: string) => {
+        const texture = createMaterialTagTexture(text, accentColor, trackedTextures, 520, 112);
+        const material = registerMaterial(
+          new THREE.MeshBasicMaterial({
+            map: texture,
+            transparent: true,
+            depthWrite: false,
+            toneMapped: false,
+          }),
+        );
+        const label = new THREE.Mesh(tagGeometry, material);
+        label.userData.skipGlobalWireframe = true;
+        label.renderOrder = 3;
+        return label;
+      };
+
+      const variantDefinitions: Array<{
+        label: string;
+        family: "Marble" | "Metal" | "Wood";
+        asset: ScannedPbrAssetKey;
+        accent: string;
+        position: THREE.Vector3;
+        materialOverrides: Partial<THREE.MeshPhysicalMaterialParameters> & {
+          normalScale?: number;
+        };
+      }> = [
+        {
+          label: "Pearl Marble",
+          family: "Marble",
+          asset: "Marble 01" as ScannedPbrAssetKey,
+          accent: "#d7c7af",
+          position: new THREE.Vector3(-3.9, 0, -1.8),
+          materialOverrides: {
+            color: "#efe7de",
+            roughness: 0.18,
+            clearcoat: 0.42,
+            clearcoatRoughness: 0.08,
+            iridescence: 0.38,
+            iridescenceIOR: 1.24,
+            iridescenceThicknessRange: [120, 520],
+          },
+        },
+        {
+          label: "Champagne Onyx",
+          family: "Marble",
+          asset: "Marble 01" as ScannedPbrAssetKey,
+          accent: "#e2b786",
+          position: new THREE.Vector3(0, 0, -1.8),
+          materialOverrides: {
+            color: "#ddb57d",
+            roughness: 0.06,
+            clearcoat: 1,
+            clearcoatRoughness: 0.03,
+            transmission: 0.18,
+            thickness: 0.8,
+            attenuationDistance: 2.2,
+            attenuationColor: "#f2d2a1",
+          },
+        },
+        {
+          label: "Oil-Slick Steel",
+          family: "Metal",
+          asset: "Metal Plate" as ScannedPbrAssetKey,
+          accent: "#6ac7d8",
+          position: new THREE.Vector3(3.9, 0, -1.8),
+          materialOverrides: {
+            color: "#74c7d7",
+            roughness: 0.18,
+            metalness: 1,
+            clearcoat: 0.18,
+            clearcoatRoughness: 0.04,
+            iridescence: 1,
+            iridescenceIOR: 1.3,
+            iridescenceThicknessRange: [180, 720],
+          },
+        },
+        {
+          label: "Black Chrome",
+          family: "Metal",
+          asset: "Metal Plate" as ScannedPbrAssetKey,
+          accent: "#9cdad0",
+          position: new THREE.Vector3(-3.9, 0, 1.95),
+          materialOverrides: {
+            color: "#23262c",
+            roughness: 0.08,
+            metalness: 1,
+            clearcoat: 0.28,
+            clearcoatRoughness: 0.03,
+          },
+        },
+        {
+          label: "Honey Varnish",
+          family: "Wood",
+          asset: "Wood Floor" as ScannedPbrAssetKey,
+          accent: "#e0a562",
+          position: new THREE.Vector3(0, 0, 1.95),
+          materialOverrides: {
+            color: "#d9a05d",
+            roughness: 0.18,
+            clearcoat: 1,
+            clearcoatRoughness: 0.05,
+            sheen: 0.2,
+            sheenColor: "#fff1d6",
+            sheenRoughness: 0.24,
+          },
+        },
+        {
+          label: "Candy Resin",
+          family: "Wood",
+          asset: "Wood Floor" as ScannedPbrAssetKey,
+          accent: "#ef7f6d",
+          position: new THREE.Vector3(3.9, 0, 1.95),
+          materialOverrides: {
+            color: "#dd7061",
+            roughness: 0.12,
+            clearcoat: 1,
+            clearcoatRoughness: 0.03,
+            transmission: 0.28,
+            thickness: 0.95,
+            attenuationDistance: 1.6,
+            attenuationColor: "#f08c77",
+          },
+        },
+      ];
+
+      const variantNodes = variantDefinitions.map((definition) => {
+        const heroMaterial = createPhysicalMaterial({
+          color: "#ffffff",
+          roughness: 0.4,
+          metalness: 0.1,
+        });
+
+        const group = new THREE.Group();
+        group.position.copy(definition.position);
+
+        const rig = new THREE.Group();
+        rig.position.y = 0.18;
+        rig.rotation.x = -Math.PI / 2;
+        rig.scale.setScalar(0.34);
+        group.add(rig);
+
+        const tag = createHeroTag(definition.label, definition.accent);
+        tag.position.set(0, 0.34, 1.1);
+
+        group.add(tag);
+        scene.add(group);
+
+        return {
+          ...definition,
+          group,
+          rig,
+          heroMaterial,
+          tag,
+        };
+      });
+
+      const stlLoader = new STLLoader();
+      const shaderBallParts = {
+        shellLowerRing: null as THREE.BufferGeometry | null,
+        shellUpperA: null as THREE.BufferGeometry | null,
+        shellUpperB: null as THREE.BufferGeometry | null,
+        corePedestal: null as THREE.BufferGeometry | null,
+        coreInner: null as THREE.BufferGeometry | null,
+      };
+
+      const attachShaderBallRig = (target: THREE.Group, shellMaterial: THREE.Material) => {
+        if (
+          !shaderBallParts.shellLowerRing ||
+          !shaderBallParts.shellUpperA ||
+          !shaderBallParts.shellUpperB ||
+          !shaderBallParts.corePedestal ||
+          !shaderBallParts.coreInner
+        ) {
+          return;
+        }
+
+        target.clear();
+
+        const shellParts = [
+          new THREE.Mesh(shaderBallParts.shellLowerRing, shellMaterial),
+          new THREE.Mesh(shaderBallParts.shellUpperA, shellMaterial),
+          new THREE.Mesh(shaderBallParts.shellUpperB, shellMaterial),
+        ];
+        const coreParts = [
+          new THREE.Mesh(shaderBallParts.corePedestal, coreMaterial),
+          new THREE.Mesh(shaderBallParts.coreInner, coreMaterial),
+        ];
+
+        for (const mesh of [...shellParts, ...coreParts]) {
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          target.add(mesh);
+        }
+      };
+
+      const syncVisibility = () => {
+        const filter = benchState.isolate;
+
+        for (const variant of variantNodes) {
+          const visible = filter === "All" || filter === variant.family;
+          variant.group.visible = visible;
+          variant.tag.visible = benchState.showLabels;
+        }
+      };
+
+      const syncTextureScale = () => {
+        for (const set of loadedSets.values()) {
+          setScannedPbrRepeat(set, benchState.textureScale);
+        }
+      };
+
+      const syncTheme = () => {
+        if (benchState.theme === "Dark") {
+          scene.background = new THREE.Color("#0b1017");
+          scene.fog = new THREE.Fog("#0b1017", 15, 28);
+          stageBase.material.color.set("#151d28");
+          stageTopMaterial.color.set("#2b3442");
+          stageTopMaterial.map = lookdevFloorTextures.Dark;
+          stageTopMaterial.needsUpdate = true;
+          (shadowCatcher.material as THREE.ShadowMaterial).color.set("#01060c");
+          (shadowCatcher.material as THREE.ShadowMaterial).opacity = 0.48;
+          backdrop.material.color.set("#1a2230");
+          sideWingLeft.material.color.set("#111926");
+          sideWingRight.material.color.set("#151e2a");
+          coreMaterial.color.set("#f0f2f6");
+          key.color.set("#fff0dc");
+          fill.color.set("#87a4c7");
+          fill.groundColor.set("#101824");
+          rim.color.set("#cadfff");
+          accent.color.set("#ffc08a");
+          (accentMarker.material as THREE.MeshBasicMaterial).color.set("#ffe1bc");
+        } else {
+          scene.background = new THREE.Color("#b8c1cc");
+          scene.fog = new THREE.Fog("#b8c1cc", 17, 31);
+          stageBase.material.color.set("#4f5867");
+          stageTopMaterial.color.set("#b7c0cb");
+          stageTopMaterial.map = lookdevFloorTextures.Light;
+          stageTopMaterial.needsUpdate = true;
+          (shadowCatcher.material as THREE.ShadowMaterial).color.set("#243242");
+          (shadowCatcher.material as THREE.ShadowMaterial).opacity = 0.26;
+          backdrop.material.color.set("#c6ced8");
+          sideWingLeft.material.color.set("#aeb9c7");
+          sideWingRight.material.color.set("#b7c1ce");
+          coreMaterial.color.set("#f1f4f7");
+          key.color.set("#fff7eb");
+          fill.color.set("#bccfe5");
+          fill.groundColor.set("#617087");
+          rim.color.set("#d9e6ff");
+          accent.color.set("#ffd6b0");
+          (accentMarker.material as THREE.MeshBasicMaterial).color.set("#fff2df");
+        }
+      };
+
+      const syncLookdev = () => {
+        renderer.toneMappingExposure = benchState.exposure;
+        key.intensity = benchState.keyIntensity;
+        fill.intensity = benchState.fillIntensity;
+        rim.intensity = benchState.rimIntensity;
+        accent.intensity = benchState.accentIntensity;
+
+        for (const material of trackedMaterials) {
+          const envMaterial = material as THREE.Material & { envMapIntensity?: number };
+
+          if (typeof envMaterial.envMapIntensity === "number") {
+            envMaterial.envMapIntensity = benchState.envIntensity;
+          }
+        }
+      };
+
+      const syncAssignments = () => {
+        for (const variant of variantNodes) {
+          const set = loadedSets.get(variant.asset);
+
+          if (!set) {
+            continue;
+          }
+
+          applyScannedPbrSet(variant.heroMaterial, set);
+
+          if (typeof variant.materialOverrides.roughness === "number") {
+            variant.heroMaterial.roughness = variant.materialOverrides.roughness;
+          }
+
+          if (typeof variant.materialOverrides.metalness === "number") {
+            variant.heroMaterial.metalness = variant.materialOverrides.metalness;
+          }
+
+          if (typeof variant.materialOverrides.clearcoat === "number") {
+            variant.heroMaterial.clearcoat = variant.materialOverrides.clearcoat;
+          }
+
+          if (typeof variant.materialOverrides.clearcoatRoughness === "number") {
+            variant.heroMaterial.clearcoatRoughness = variant.materialOverrides.clearcoatRoughness;
+          }
+
+          if (variant.materialOverrides.color) {
+            variant.heroMaterial.color.set(variant.materialOverrides.color);
+          }
+
+          if (typeof variant.materialOverrides.transmission === "number") {
+            variant.heroMaterial.transmission = variant.materialOverrides.transmission;
+          }
+
+          if (typeof variant.materialOverrides.thickness === "number") {
+            variant.heroMaterial.thickness = variant.materialOverrides.thickness;
+          }
+
+          if (typeof variant.materialOverrides.ior === "number") {
+            variant.heroMaterial.ior = variant.materialOverrides.ior;
+          }
+
+          if (typeof variant.materialOverrides.attenuationDistance === "number") {
+            variant.heroMaterial.attenuationDistance = variant.materialOverrides.attenuationDistance;
+          }
+
+          if (variant.materialOverrides.attenuationColor) {
+            variant.heroMaterial.attenuationColor = new THREE.Color(variant.materialOverrides.attenuationColor);
+          }
+
+          if (typeof variant.materialOverrides.iridescence === "number") {
+            variant.heroMaterial.iridescence = variant.materialOverrides.iridescence;
+          }
+
+          if (typeof variant.materialOverrides.iridescenceIOR === "number") {
+            variant.heroMaterial.iridescenceIOR = variant.materialOverrides.iridescenceIOR;
+          }
+
+          if (variant.materialOverrides.iridescenceThicknessRange) {
+            variant.heroMaterial.iridescenceThicknessRange = variant.materialOverrides.iridescenceThicknessRange;
+          }
+
+          if (typeof variant.materialOverrides.sheen === "number") {
+            variant.heroMaterial.sheen = variant.materialOverrides.sheen;
+          }
+
+          if (variant.materialOverrides.sheenColor) {
+            variant.heroMaterial.sheenColor = new THREE.Color(variant.materialOverrides.sheenColor);
+          }
+
+          if (typeof variant.materialOverrides.sheenRoughness === "number") {
+            variant.heroMaterial.sheenRoughness = variant.materialOverrides.sheenRoughness;
+          }
+
+          if (typeof variant.materialOverrides.specularIntensity === "number") {
+            variant.heroMaterial.specularIntensity = variant.materialOverrides.specularIntensity;
+          }
+
+          if (variant.materialOverrides.specularColor) {
+            variant.heroMaterial.specularColor = new THREE.Color(variant.materialOverrides.specularColor);
+          }
+
+          if (typeof variant.materialOverrides.normalScale === "number") {
+            variant.heroMaterial.normalScale.setScalar(variant.materialOverrides.normalScale);
+          }
+
+          variant.heroMaterial.needsUpdate = true;
+        }
+
+        const woodSet = loadedSets.get("Wood Floor");
+
+        if (woodSet) {
+          stageTopMaterial.map =
+            benchState.theme === "Dark" ? lookdevFloorTextures.Dark : lookdevFloorTextures.Light;
+          stageTopMaterial.roughnessMap = woodSet.roughness;
+          stageTopMaterial.normalMap = woodSet.normal;
+          stageTopMaterial.normalScale.set(0.32, 0.32);
+          stageTopMaterial.needsUpdate = true;
+        }
+      };
+
+      const loader = new THREE.TextureLoader();
+
+      Promise.all([
+        stlLoader.loadAsync(`${import.meta.env.BASE_URL}models/shader_ball_parts/shell_lower_ring.stl`),
+        stlLoader.loadAsync(`${import.meta.env.BASE_URL}models/shader_ball_parts/shell_upper_a.stl`),
+        stlLoader.loadAsync(`${import.meta.env.BASE_URL}models/shader_ball_parts/shell_upper_b.stl`),
+        stlLoader.loadAsync(`${import.meta.env.BASE_URL}models/shader_ball_parts/core_pedestal.stl`),
+        stlLoader.loadAsync(`${import.meta.env.BASE_URL}models/shader_ball_parts/core_inner.stl`),
+      ])
+        .then(([shellLowerRing, shellUpperA, shellUpperB, corePedestal, coreInner]) => {
+          if (disposed) {
+            shellLowerRing.dispose();
+            shellUpperA.dispose();
+            shellUpperB.dispose();
+            corePedestal.dispose();
+            coreInner.dispose();
+            return;
+          }
+
+          const shellCenter = new THREE.Vector3(0, 0, 4);
+          const ringCenter = new THREE.Vector3(0, 0, 0.465);
+          const coreCenter = new THREE.Vector3(0, 0, 4);
+
+          const preparedShellLowerRing = prepareShaderBallPartGeometry(shellLowerRing, (geometry) => {
+            applyCylindricalUvs(geometry, ringCenter);
+          });
+          const preparedShellUpperA = prepareShaderBallPartGeometry(shellUpperA, (geometry) => {
+            applySphericalUvs(geometry, shellCenter);
+          });
+          const preparedShellUpperB = prepareShaderBallPartGeometry(shellUpperB, (geometry) => {
+            applySphericalUvs(geometry, shellCenter);
+          });
+          const preparedCorePedestal = prepareShaderBallPartGeometry(corePedestal, (geometry) => {
+            applyCylindricalUvs(geometry, ringCenter);
+          });
+          const preparedCoreInner = prepareShaderBallPartGeometry(coreInner, (geometry) => {
+            applySphericalUvs(geometry, coreCenter);
+          });
+
+          shellLowerRing.dispose();
+          shellUpperA.dispose();
+          shellUpperB.dispose();
+          corePedestal.dispose();
+          coreInner.dispose();
+
+          shaderBallParts.shellLowerRing = registerGeometry(preparedShellLowerRing);
+          shaderBallParts.shellUpperA = registerGeometry(preparedShellUpperA);
+          shaderBallParts.shellUpperB = registerGeometry(preparedShellUpperB);
+          shaderBallParts.corePedestal = registerGeometry(preparedCorePedestal);
+          shaderBallParts.coreInner = registerGeometry(preparedCoreInner);
+
+          variantNodes.forEach((variant) => {
+            attachShaderBallRig(variant.rig, variant.heroMaterial);
+          });
+        })
+        .catch((error) => {
+          console.warn("Could not load standard shader ball parts", error);
+        });
+
+      (Object.keys(SCANNED_PBR_ASSETS) as ScannedPbrAssetKey[]).forEach((keyName) => {
+        void loadScannedPbrSet(keyName, loader, trackedTextures)
+          .then((set) => {
+            if (disposed) {
+              set.textures.forEach((texture) => texture.dispose());
+              return;
+            }
+
+            loadedSets.set(keyName, set);
+            syncTextureScale();
+            syncAssignments();
+          })
+          .catch((error) => {
+            console.warn(`Could not load scanned PBR set "${keyName}"`, error);
+          });
+      });
+
+      syncTheme();
+      syncLookdev();
+      syncVisibility();
+
+      return {
+        update: (elapsed) => {
+          if (!benchState.animateLight) {
+            if (!benchState.turntable) {
+              return;
+            }
+          }
+
+          if (benchState.animateLight) {
+            accentRig.rotation.y = elapsed * 0.2;
+            accent.position.y = 3.7 + Math.sin(elapsed * 1.1) * 0.6;
+            key.position.x = Math.cos(elapsed * 0.18) * 7.4;
+            key.position.z = -5.6 + Math.sin(elapsed * 0.18) * 2.4;
+          }
+
+          if (benchState.turntable) {
+            variantNodes.forEach((variant, index) => {
+              variant.group.rotation.y = Math.sin(elapsed * 0.28 + index * 0.45) * 0.26;
+            });
+          } else {
+            variantNodes.forEach((variant) => {
+              variant.group.rotation.y = 0;
+            });
+          }
+        },
+        setupGui: ({ gui }) => {
+          const materialFolder = gui.addFolder("Scanned PBR");
+          materialFolder
+            .add(benchState, "theme", ["Light", "Dark"])
+            .name("theme")
+            .onChange(syncTheme);
+          materialFolder
+            .add(benchState, "isolate", ["All", "Marble", "Metal", "Wood"])
+            .name("isolate")
+            .onChange(syncVisibility);
+          materialFolder.add(benchState, "showLabels").name("labels").onChange(syncVisibility);
+          materialFolder
+            .add(benchState, "textureScale", 0.55, 2.25, 0.01)
+            .name("texture scale")
+            .onChange(syncTextureScale);
+          materialFolder.add(benchState, "turntable").name("turntable");
+
+          const lightingFolder = gui.addFolder("Lighting");
+          lightingFolder
+            .add(benchState, "envIntensity", 0, 2.8, 0.05)
+            .name("env intensity")
+            .onChange(syncLookdev);
+          lightingFolder
+            .add(benchState, "exposure", 0.75, 1.8, 0.01)
+            .name("exposure")
+            .onChange(syncLookdev);
+          lightingFolder
+            .add(benchState, "keyIntensity", 0, 3.5, 0.01)
+            .name("key")
+            .onChange(syncLookdev);
+          lightingFolder
+            .add(benchState, "fillIntensity", 0, 1.5, 0.01)
+            .name("fill")
+            .onChange(syncLookdev);
+          lightingFolder
+            .add(benchState, "rimIntensity", 0, 2.5, 0.01)
+            .name("rim")
+            .onChange(syncLookdev);
+          lightingFolder
+            .add(benchState, "accentIntensity", 0, 32, 0.25)
+            .name("accent")
+            .onChange(syncLookdev);
+          lightingFolder.add(benchState, "animateLight").name("animate light");
+        },
+        dispose: () => {
+          disposed = true;
+          scene.environment = null;
+          environmentTarget.dispose();
+          pmremGenerator.dispose();
+          roomEnvironment.dispose();
+
+          for (const texture of trackedTextures) {
+            texture.dispose();
+          }
+
+          for (const geometry of trackedGeometries) {
+            geometry.dispose();
+          }
+
+          for (const material of trackedMaterials) {
+            material.dispose();
+          }
+        },
+      };
+    },
+  },
+  {
+    step: "Step 04E",
+    title: "Texture Contribution Lab",
+    summary: "Toggle real albedo, roughness, normal, and metalness inputs on and off so you can feel exactly what each map contributes to a scanned PBR material.",
+    notes:
+      "A lot of PBR confusion comes from seeing the final result but never isolating the inputs. This card keeps the lighting fixed and lets you strip maps away until the material collapses into something flatter and less believable.",
+    tags: ["Albedo map", "Roughness map", "Normal map", "Map contribution"],
+    cameraPosition: [0.2, 4.8, 10.8],
+    target: [0, 1.2, -0.2],
+    create: ({ scene, renderer }) => {
+      scene.background = new THREE.Color("#cfd6df");
+      scene.fog = new THREE.Fog("#cfd6df", 16, 30);
+      renderer.toneMappingExposure = 0.97;
+
+      const contributionState = {
+        material: "Metal Plate" as ScannedPbrAssetKey,
+        albedo: true,
+        roughness: true,
+        normal: true,
+        metalness: true,
+        showBoards: true,
+        textureScale: 1,
+        envIntensity: 0.84,
+        exposure: 0.97,
+        keyIntensity: 1.3,
+        fillIntensity: 0.18,
+        rimIntensity: 0.56,
+        accentIntensity: 9,
+        turntable: false,
+      };
+
+      const trackedMaterials: THREE.Material[] = [];
+      const trackedTextures: THREE.Texture[] = [];
+      const trackedGeometries: THREE.BufferGeometry[] = [];
+      const loadedSets = new Map<ScannedPbrAssetKey, LoadedScannedPbrSet>();
+      let disposed = false;
+
+      const registerMaterial = <T extends THREE.Material>(material: T): T => {
+        trackedMaterials.push(material);
+        const envMaterial = material as THREE.Material & { envMapIntensity?: number };
+
+        if (typeof envMaterial.envMapIntensity === "number") {
+          envMaterial.envMapIntensity = contributionState.envIntensity;
+        }
+
+        return material;
+      };
+
+      const registerGeometry = <T extends THREE.BufferGeometry>(geometry: T): T => {
+        trackedGeometries.push(geometry);
+        return geometry;
+      };
+
+      const createPhysicalMaterial = (parameters: THREE.MeshPhysicalMaterialParameters) =>
+        registerMaterial(new THREE.MeshPhysicalMaterial(parameters));
+
+      const roomEnvironment = new RoomEnvironment();
+      const pmremGenerator = new THREE.PMREMGenerator(renderer);
+      const environmentTarget = pmremGenerator.fromScene(roomEnvironment, 0.03);
+      scene.environment = environmentTarget.texture;
+
+      const floorMaterial = createPhysicalMaterial({
+        color: "#b8c1cc",
+        roughness: 0.88,
+        metalness: 0.03,
+        clearcoat: 0.04,
+      });
+      const floor = new THREE.Mesh(registerGeometry(new THREE.PlaneGeometry(12.8, 8.4)), floorMaterial);
+      floor.rotation.x = -Math.PI / 2;
+      floor.position.y = -0.02;
+      floor.receiveShadow = true;
+
+      const floorShadow = new THREE.Mesh(
+        registerGeometry(new THREE.PlaneGeometry(12.8, 8.4)),
+        registerMaterial(
+          new THREE.ShadowMaterial({
+            color: "#223140",
+            opacity: 0.22,
+          }),
+        ),
+      );
+      floorShadow.rotation.x = -Math.PI / 2;
+      floorShadow.position.y = -0.015;
+      floorShadow.receiveShadow = true;
+
+      const stageBase = new THREE.Mesh(
+        registerGeometry(new THREE.BoxGeometry(13.4, 0.28, 9)),
+        createPhysicalMaterial({
+          color: "#57606c",
+          roughness: 0.92,
+          metalness: 0.03,
+        }),
+      );
+      stageBase.position.y = -0.18;
+      stageBase.receiveShadow = true;
+
+      const backdrop = new THREE.Mesh(
+        registerGeometry(new THREE.PlaneGeometry(13.8, 5.8)),
+        createPhysicalMaterial({
+          color: "#dfe5ec",
+          roughness: 0.94,
+          metalness: 0.02,
+        }),
+      );
+      backdrop.position.set(0, 2.9, -4.1);
+
+      const keyTarget = new THREE.Object3D();
+      keyTarget.position.set(0, 0.8, -0.4);
+
+      const key = new THREE.DirectionalLight("#fff7eb", contributionState.keyIntensity);
+      key.position.set(6.6, 8.2, -5.6);
+      key.castShadow = true;
+      key.target = keyTarget;
+      key.shadow.mapSize.set(2048, 2048);
+      key.shadow.camera.left = -9;
+      key.shadow.camera.right = 9;
+      key.shadow.camera.top = 9;
+      key.shadow.camera.bottom = -9;
+      key.shadow.bias = -0.00008;
+      key.shadow.normalBias = 0.02;
+
+      const fill = new THREE.HemisphereLight("#d4e7ff", "#73829a", contributionState.fillIntensity);
+      const rim = new THREE.DirectionalLight("#d9e5ff", contributionState.rimIntensity);
+      rim.position.set(-4.8, 5.8, 5.2);
+
+      const accentRig = new THREE.Group();
+      const accent = new THREE.PointLight("#ffd7bc", contributionState.accentIntensity, 16, 2);
+      accent.position.set(0, 3.5, 2.5);
+      const accentMarker = new THREE.Mesh(
+        registerGeometry(new THREE.SphereGeometry(0.08, 16, 16)),
+        registerMaterial(new THREE.MeshBasicMaterial({ color: "#fff2df" })),
+      );
+      accent.add(accentMarker);
+      accentRig.add(accent);
+
+      scene.add(stageBase, floor, floorShadow, backdrop, keyTarget, key, fill, rim, accentRig);
+
+      const heroSphereMaterial = createPhysicalMaterial({
+        color: "#718187",
+        roughness: 0.72,
+        metalness: 0.92,
+      });
+      const heroBlockMaterial = createPhysicalMaterial({
+        color: "#718187",
+        roughness: 0.72,
+        metalness: 0.92,
+      });
+
+      const sphere = new THREE.Mesh(registerGeometry(new THREE.SphereGeometry(1.08, 64, 48)), heroSphereMaterial);
+      sphere.position.set(-1.32, 1.08, 0.2);
+      sphere.castShadow = true;
+      sphere.receiveShadow = true;
+
+      const block = new THREE.Mesh(registerGeometry(new THREE.BoxGeometry(1.58, 2.04, 1.12, 12, 12, 12)), heroBlockMaterial);
+      block.position.set(1.74, 1.08, 0.1);
+      block.rotation.set(-0.2, 0.46, 0.04);
+      block.castShadow = true;
+      block.receiveShadow = true;
+
+      const boardFrameGeometry = registerGeometry(new THREE.BoxGeometry(0.92, 1.34, 0.05));
+      const boardSurfaceGeometry = registerGeometry(new THREE.PlaneGeometry(0.78, 1.2));
+      const boardLabelGeometry = registerGeometry(new THREE.PlaneGeometry(0.98, 0.28));
+
+      const previewGroup = new THREE.Group();
+      previewGroup.position.set(0, 2.1, -1.46);
+
+      const previewBoardMaterials = [
+        registerMaterial(new THREE.MeshBasicMaterial({ toneMapped: false })),
+        registerMaterial(new THREE.MeshBasicMaterial({ toneMapped: false })),
+        registerMaterial(new THREE.MeshBasicMaterial({ toneMapped: false })),
+      ] as const;
+      const previewTextures: Array<THREE.Texture | null> = [null, null, null];
+
+      const createPreviewBoard = (x: number, accentColor: string, material: THREE.MeshBasicMaterial, title: string) => {
+        const frame = new THREE.Mesh(
+          boardFrameGeometry,
+          createPhysicalMaterial({
+            color: accentColor,
+            roughness: 0.4,
+            metalness: 0.16,
+          }),
+        );
+        frame.position.x = x;
+        const surface = new THREE.Mesh(boardSurfaceGeometry, material);
+        surface.position.set(x, 0, 0.03);
+        const labelTexture = createMaterialTagTexture(title, accentColor, trackedTextures, 420, 120);
+        const labelMaterial = registerMaterial(
+          new THREE.MeshBasicMaterial({
+            map: labelTexture,
+            transparent: true,
+            depthWrite: false,
+            toneMapped: false,
+          }),
+        );
+        const label = new THREE.Mesh(boardLabelGeometry, labelMaterial);
+        label.position.set(x, -0.92, 0.04);
+        label.userData.skipGlobalWireframe = true;
+        label.renderOrder = 3;
+        previewGroup.add(frame, surface, label);
+      };
+
+      createPreviewBoard(-1.08, "#78acd0", previewBoardMaterials[0], "Albedo");
+      createPreviewBoard(0, "#d0b582", previewBoardMaterials[1], "Rough / ARM");
+      createPreviewBoard(1.08, "#96afd8", previewBoardMaterials[2], "Normal");
+      previewGroup.visible = contributionState.showBoards;
+      scene.add(previewGroup, sphere, block);
+
+      const loader = new THREE.TextureLoader();
+
+      const syncLookdev = () => {
+        renderer.toneMappingExposure = contributionState.exposure;
+        key.intensity = contributionState.keyIntensity;
+        fill.intensity = contributionState.fillIntensity;
+        rim.intensity = contributionState.rimIntensity;
+        accent.intensity = contributionState.accentIntensity;
+
+        for (const material of trackedMaterials) {
+          const envMaterial = material as THREE.Material & { envMapIntensity?: number };
+
+          if (typeof envMaterial.envMapIntensity === "number") {
+            envMaterial.envMapIntensity = contributionState.envIntensity;
+          }
+        }
+      };
+
+      const syncTextureScale = () => {
+        for (const set of loadedSets.values()) {
+          setScannedPbrRepeat(set, contributionState.textureScale);
+        }
+      };
+
+      const setPreviewMap = (index: number, source: THREE.Texture) => {
+        previewTextures[index]?.dispose();
+        const preview = clonePreviewTexture(source, trackedTextures);
+        previewTextures[index] = preview;
+        previewBoardMaterials[index].map = preview;
+        previewBoardMaterials[index].needsUpdate = true;
+      };
+
+      const syncSelectedMaterial = () => {
+        const set = loadedSets.get(contributionState.material);
+
+        if (!set) {
+          return;
+        }
+
+        applyScannedPbrSet(heroSphereMaterial, set, {
+          albedo: contributionState.albedo,
+          roughness: contributionState.roughness,
+          normal: contributionState.normal,
+          metalness: contributionState.metalness,
+        });
+        applyScannedPbrSet(heroBlockMaterial, set, {
+          albedo: contributionState.albedo,
+          roughness: contributionState.roughness,
+          normal: contributionState.normal,
+          metalness: contributionState.metalness,
+        });
+        applyScannedPbrSet(floorMaterial, set, {
+          albedo: contributionState.albedo,
+          roughness: contributionState.roughness,
+          normal: contributionState.normal,
+          metalness: contributionState.metalness,
+        });
+        syncTextureScale();
+        setPreviewMap(0, set.diffuse);
+        setPreviewMap(1, set.arm ?? set.roughness ?? set.diffuse);
+        setPreviewMap(2, set.normal);
+      };
+
+      const syncVisibility = () => {
+        previewGroup.visible = contributionState.showBoards;
+      };
+
+      (Object.keys(SCANNED_PBR_ASSETS) as ScannedPbrAssetKey[]).forEach((keyName) => {
+        void loadScannedPbrSet(keyName, loader, trackedTextures)
+          .then((set) => {
+            if (disposed) {
+              set.textures.forEach((texture) => texture.dispose());
+              return;
+            }
+
+            loadedSets.set(keyName, set);
+            setScannedPbrRepeat(set, contributionState.textureScale);
+
+            if (keyName === contributionState.material) {
+              syncSelectedMaterial();
+            }
+          })
+          .catch((error) => {
+            console.warn(`Could not load scanned PBR set "${keyName}"`, error);
+          });
+      });
+
+      syncLookdev();
+      syncVisibility();
+
+      return {
+        update: (elapsed) => {
+          if (!contributionState.turntable) {
+            return;
+          }
+
+          sphere.rotation.y = elapsed * 0.45;
+          block.rotation.y = 0.46 + elapsed * 0.3;
+          accentRig.rotation.y = elapsed * 0.16;
+        },
+        setupGui: ({ gui }) => {
+          const materialFolder = gui.addFolder("Material");
+          materialFolder
+            .add(contributionState, "material", ["Marble 01", "Metal Plate", "Wood Floor"])
+            .name("surface")
+            .onChange(syncSelectedMaterial);
+          materialFolder.add(contributionState, "albedo").name("albedo").onChange(syncSelectedMaterial);
+          materialFolder.add(contributionState, "roughness").name("roughness").onChange(syncSelectedMaterial);
+          materialFolder.add(contributionState, "normal").name("normal").onChange(syncSelectedMaterial);
+          materialFolder.add(contributionState, "metalness").name("metalness").onChange(syncSelectedMaterial);
+          materialFolder
+            .add(contributionState, "textureScale", 0.5, 2.25, 0.01)
+            .name("texture scale")
+            .onChange(syncTextureScale);
+          materialFolder.add(contributionState, "showBoards").name("map boards").onChange(syncVisibility);
+          materialFolder.add(contributionState, "turntable").name("turntable");
+
+          const lightFolder = gui.addFolder("Lighting");
+          lightFolder
+            .add(contributionState, "envIntensity", 0, 2.8, 0.05)
+            .name("env intensity")
+            .onChange(syncLookdev);
+          lightFolder
+            .add(contributionState, "exposure", 0.8, 1.8, 0.01)
+            .name("exposure")
+            .onChange(syncLookdev);
+          lightFolder
+            .add(contributionState, "keyIntensity", 0, 3.5, 0.01)
+            .name("key")
+            .onChange(syncLookdev);
+          lightFolder
+            .add(contributionState, "fillIntensity", 0, 1.4, 0.01)
+            .name("fill")
+            .onChange(syncLookdev);
+          lightFolder
+            .add(contributionState, "rimIntensity", 0, 2.4, 0.01)
+            .name("rim")
+            .onChange(syncLookdev);
+          lightFolder
+            .add(contributionState, "accentIntensity", 0, 28, 0.25)
+            .name("accent")
+            .onChange(syncLookdev);
+        },
+        dispose: () => {
+          disposed = true;
+          scene.environment = null;
+          environmentTarget.dispose();
+          pmremGenerator.dispose();
+          roomEnvironment.dispose();
+
+          for (const texture of trackedTextures) {
+            texture.dispose();
+          }
+
+          for (const geometry of trackedGeometries) {
+            geometry.dispose();
+          }
+
+          for (const material of trackedMaterials) {
+            material.dispose();
+          }
+        },
+      };
+    },
+  },
+  {
+    step: "Step 04F",
+    title: "Architectural Material Vignette",
+    summary: "Apply the same scanned asset pack to floors, cladding, and trim on a tiny architectural study so the materials read on actual house-like forms instead of isolated primitives.",
+    notes:
+      "This is the bridge from material-ball lookdev to architecture. The scene is still simple, but it starts to answer the real question: how does this asset set feel on a floor, a wall panel, and a metal detail in the same space?",
+    tags: ["Architectural study", "Material assignment", "Floor / cladding / trim"],
+    cameraPosition: [6.6, 4.8, 8.9],
+    target: [0.5, 1.3, -0.8],
+    create: ({ scene, renderer }) => {
+      scene.background = new THREE.Color("#d3d7d3");
+      scene.fog = new THREE.Fog("#d3d7d3", 18, 34);
+      renderer.toneMappingExposure = 0.98;
+
+      const vignetteState = {
+        floorMaterial: "Wood Floor" as ScannedPbrAssetKey,
+        claddingMaterial: "Marble 01" as ScannedPbrAssetKey,
+        trimMaterial: "Metal Plate" as ScannedPbrAssetKey,
+        textureScale: 1,
+        envIntensity: 0.8,
+        exposure: 0.98,
+        sunIntensity: 1.35,
+        skyFill: 0.24,
+        bounce: 0.42,
+        animateSun: false,
+      };
+
+      const trackedMaterials: THREE.Material[] = [];
+      const trackedTextures: THREE.Texture[] = [];
+      const trackedGeometries: THREE.BufferGeometry[] = [];
+      const loadedSets = new Map<ScannedPbrAssetKey, LoadedScannedPbrSet>();
+      let disposed = false;
+
+      const registerMaterial = <T extends THREE.Material>(material: T): T => {
+        trackedMaterials.push(material);
+        const envMaterial = material as THREE.Material & { envMapIntensity?: number };
+
+        if (typeof envMaterial.envMapIntensity === "number") {
+          envMaterial.envMapIntensity = vignetteState.envIntensity;
+        }
+
+        return material;
+      };
+
+      const registerGeometry = <T extends THREE.BufferGeometry>(geometry: T): T => {
+        trackedGeometries.push(geometry);
+        return geometry;
+      };
+
+      const createPhysicalMaterial = (parameters: THREE.MeshPhysicalMaterialParameters) =>
+        registerMaterial(new THREE.MeshPhysicalMaterial(parameters));
+
+      const roomEnvironment = new RoomEnvironment();
+      const pmremGenerator = new THREE.PMREMGenerator(renderer);
+      const environmentTarget = pmremGenerator.fromScene(roomEnvironment, 0.03);
+      scene.environment = environmentTarget.texture;
+
+      const ground = new THREE.Mesh(
+        registerGeometry(new THREE.PlaneGeometry(24, 24)),
+        createPhysicalMaterial({
+          color: "#d7d0c3",
+          roughness: 0.94,
+          metalness: 0.02,
+        }),
+      );
+      ground.rotation.x = -Math.PI / 2;
+      ground.position.y = -0.04;
+      ground.receiveShadow = true;
+
+      const pad = new THREE.Mesh(
+        registerGeometry(new THREE.BoxGeometry(8.4, 0.18, 7.8)),
+        createPhysicalMaterial({
+          color: "#c8c0b2",
+          roughness: 0.92,
+          metalness: 0.03,
+        }),
+      );
+      pad.position.set(0, 0.02, -0.4);
+      pad.receiveShadow = true;
+
+      const floorMaterial = createPhysicalMaterial({
+        color: "#a67d5a",
+        roughness: 0.7,
+        metalness: 0.03,
+      });
+      const floorPlate = new THREE.Mesh(registerGeometry(new THREE.BoxGeometry(7.2, 0.08, 6.4)), floorMaterial);
+      floorPlate.position.set(0.2, 0.14, -0.5);
+      floorPlate.receiveShadow = true;
+      floorPlate.castShadow = true;
+
+      const wallPaintMaterial = createPhysicalMaterial({
+        color: "#ece6dd",
+        roughness: 0.92,
+        metalness: 0.01,
+      });
+      const backWall = new THREE.Mesh(registerGeometry(new THREE.BoxGeometry(7.2, 3.2, 0.18)), wallPaintMaterial);
+      backWall.position.set(0.2, 1.72, -3.62);
+      backWall.castShadow = true;
+      backWall.receiveShadow = true;
+
+      const sideWall = new THREE.Mesh(registerGeometry(new THREE.BoxGeometry(0.18, 3.2, 5.2)), wallPaintMaterial);
+      sideWall.position.set(-3.4, 1.72, -1.2);
+      sideWall.castShadow = true;
+      sideWall.receiveShadow = true;
+
+      const claddingMaterial = createPhysicalMaterial({
+        color: "#ded7ce",
+        roughness: 0.24,
+        metalness: 0,
+      });
+      const claddingPanel = new THREE.Mesh(registerGeometry(new THREE.BoxGeometry(2.26, 2.16, 0.1)), claddingMaterial);
+      claddingPanel.position.set(1.6, 1.72, -3.46);
+      claddingPanel.castShadow = true;
+      claddingPanel.receiveShadow = true;
+
+      const trimMaterial = createPhysicalMaterial({
+        color: "#718187",
+        roughness: 0.72,
+        metalness: 0.92,
+      });
+      const trimHeader = new THREE.Mesh(registerGeometry(new THREE.BoxGeometry(3.8, 0.18, 0.14)), trimMaterial);
+      trimHeader.position.set(-0.9, 2.62, -2.32);
+      trimHeader.castShadow = true;
+
+      const trimPostA = new THREE.Mesh(registerGeometry(new THREE.BoxGeometry(0.14, 1.86, 0.14)), trimMaterial);
+      trimPostA.position.set(-2.74, 1.66, -2.32);
+      trimPostA.castShadow = true;
+      const trimPostB = trimPostA.clone();
+      trimPostB.position.x = 0.94;
+      trimPostB.material = trimMaterial;
+      trimPostB.castShadow = true;
+
+      const islandBase = new THREE.Mesh(
+        registerGeometry(new THREE.BoxGeometry(1.64, 0.92, 1.08)),
+        createPhysicalMaterial({
+          color: "#d8d4ce",
+          roughness: 0.8,
+          metalness: 0.02,
+        }),
+      );
+      islandBase.position.set(0.84, 0.62, -0.74);
+      islandBase.castShadow = true;
+      islandBase.receiveShadow = true;
+
+      const islandTop = new THREE.Mesh(registerGeometry(new THREE.BoxGeometry(1.86, 0.08, 1.28)), claddingMaterial);
+      islandTop.position.set(0.84, 1.14, -0.74);
+      islandTop.castShadow = true;
+      islandTop.receiveShadow = true;
+
+      const benchSeat = new THREE.Mesh(registerGeometry(new THREE.BoxGeometry(1.46, 0.1, 0.44)), floorMaterial);
+      benchSeat.position.set(-2.1, 0.72, 0.86);
+      benchSeat.castShadow = true;
+      benchSeat.receiveShadow = true;
+
+      const benchLegA = new THREE.Mesh(registerGeometry(new THREE.BoxGeometry(0.12, 0.62, 0.12)), trimMaterial);
+      benchLegA.position.set(-2.62, 0.36, 0.86);
+      benchLegA.castShadow = true;
+      const benchLegB = benchLegA.clone();
+      benchLegB.position.x = -1.58;
+      benchLegB.material = trimMaterial;
+      benchLegB.castShadow = true;
+
+      const skyPortal = new THREE.Mesh(
+        registerGeometry(new THREE.PlaneGeometry(3.36, 1.88)),
+        registerMaterial(
+          new THREE.MeshBasicMaterial({
+            color: "#edf4fb",
+            toneMapped: false,
+          }),
+        ),
+      );
+      skyPortal.position.set(-0.9, 1.66, -2.24);
+
+      const greenery = new THREE.Mesh(
+        registerGeometry(new THREE.PlaneGeometry(2.1, 1.32)),
+        registerMaterial(
+          new THREE.MeshBasicMaterial({
+            color: "#88a97f",
+            toneMapped: false,
+          }),
+        ),
+      );
+      greenery.position.set(-0.9, 1.3, -2.2);
+
+      const sunTarget = new THREE.Object3D();
+      sunTarget.position.set(0.6, 1.1, -0.8);
+
+      const sun = new THREE.DirectionalLight("#fff4dd", vignetteState.sunIntensity);
+      sun.position.set(7.4, 8.8, 4.8);
+      sun.target = sunTarget;
+      sun.castShadow = true;
+      sun.shadow.mapSize.set(2048, 2048);
+      sun.shadow.camera.left = -10;
+      sun.shadow.camera.right = 10;
+      sun.shadow.camera.top = 10;
+      sun.shadow.camera.bottom = -10;
+      sun.shadow.bias = -0.00008;
+      sun.shadow.normalBias = 0.025;
+
+      const sky = new THREE.HemisphereLight("#cfe7ff", "#bca98d", vignetteState.skyFill);
+      const bounce = new THREE.PointLight("#ffe3c5", vignetteState.bounce * 16, 14, 2);
+      bounce.position.set(2.6, 2.2, 0.8);
+
+      scene.add(
+        ground,
+        pad,
+        floorPlate,
+        backWall,
+        sideWall,
+        claddingPanel,
+        trimHeader,
+        trimPostA,
+        trimPostB,
+        islandBase,
+        islandTop,
+        benchSeat,
+        benchLegA,
+        benchLegB,
+        skyPortal,
+        greenery,
+        sunTarget,
+        sun,
+        sky,
+        bounce,
+      );
+
+      const loader = new THREE.TextureLoader();
+
+      const syncLookdev = () => {
+        renderer.toneMappingExposure = vignetteState.exposure;
+        sun.intensity = vignetteState.sunIntensity;
+        sky.intensity = vignetteState.skyFill;
+        bounce.intensity = vignetteState.bounce * 16;
+
+        for (const material of trackedMaterials) {
+          const envMaterial = material as THREE.Material & { envMapIntensity?: number };
+
+          if (typeof envMaterial.envMapIntensity === "number") {
+            envMaterial.envMapIntensity = vignetteState.envIntensity;
+          }
+        }
+      };
+
+      const syncTextureScale = () => {
+        for (const set of loadedSets.values()) {
+          setScannedPbrRepeat(set, vignetteState.textureScale);
+        }
+      };
+
+      const applyByName = (material: THREE.MeshPhysicalMaterial, name: ScannedPbrAssetKey) => {
+        const set = loadedSets.get(name);
+
+        if (!set) {
+          return;
+        }
+
+        applyScannedPbrSet(material, set);
+      };
+
+      const syncAssignments = () => {
+        applyByName(floorMaterial, vignetteState.floorMaterial);
+        applyByName(claddingMaterial, vignetteState.claddingMaterial);
+        applyByName(trimMaterial, vignetteState.trimMaterial);
+        syncTextureScale();
+      };
+
+      (Object.keys(SCANNED_PBR_ASSETS) as ScannedPbrAssetKey[]).forEach((keyName) => {
+        void loadScannedPbrSet(keyName, loader, trackedTextures)
+          .then((set) => {
+            if (disposed) {
+              set.textures.forEach((texture) => texture.dispose());
+              return;
+            }
+
+            loadedSets.set(keyName, set);
+            setScannedPbrRepeat(set, vignetteState.textureScale);
+            syncAssignments();
+          })
+          .catch((error) => {
+            console.warn(`Could not load scanned PBR set "${keyName}"`, error);
+          });
+      });
+
+      syncLookdev();
+
+      return {
+        update: (elapsed) => {
+          if (!vignetteState.animateSun) {
+            return;
+          }
+
+          sun.position.x = Math.cos(elapsed * 0.14) * 7.6;
+          sun.position.z = 4.2 + Math.sin(elapsed * 0.14) * 2.2;
+        },
+        setupGui: ({ gui }) => {
+          const materialFolder = gui.addFolder("Assignments");
+          materialFolder
+            .add(vignetteState, "floorMaterial", ["Wood Floor", "Marble 01", "Metal Plate"])
+            .name("floor")
+            .onChange(syncAssignments);
+          materialFolder
+            .add(vignetteState, "claddingMaterial", ["Marble 01", "Wood Floor", "Metal Plate"])
+            .name("cladding")
+            .onChange(syncAssignments);
+          materialFolder
+            .add(vignetteState, "trimMaterial", ["Metal Plate", "Marble 01", "Wood Floor"])
+            .name("trim")
+            .onChange(syncAssignments);
+          materialFolder
+            .add(vignetteState, "textureScale", 0.5, 2.2, 0.01)
+            .name("texture scale")
+            .onChange(syncTextureScale);
+
+          const lightFolder = gui.addFolder("Lighting");
+          lightFolder
+            .add(vignetteState, "envIntensity", 0, 2.8, 0.05)
+            .name("env intensity")
+            .onChange(syncLookdev);
+          lightFolder
+            .add(vignetteState, "exposure", 0.8, 1.8, 0.01)
+            .name("exposure")
+            .onChange(syncLookdev);
+          lightFolder
+            .add(vignetteState, "sunIntensity", 0, 3.6, 0.01)
+            .name("sun")
+            .onChange(syncLookdev);
+          lightFolder
+            .add(vignetteState, "skyFill", 0, 1.2, 0.01)
+            .name("sky fill")
+            .onChange(syncLookdev);
+          lightFolder
+            .add(vignetteState, "bounce", 0, 1.2, 0.01)
+            .name("bounce")
+            .onChange(syncLookdev);
+          lightFolder.add(vignetteState, "animateSun").name("animate sun");
+        },
+        dispose: () => {
+          disposed = true;
+          scene.environment = null;
+          environmentTarget.dispose();
+          pmremGenerator.dispose();
+          roomEnvironment.dispose();
+
+          for (const texture of trackedTextures) {
+            texture.dispose();
+          }
+
+          for (const geometry of trackedGeometries) {
+            geometry.dispose();
+          }
+
+          for (const material of trackedMaterials) {
+            material.dispose();
+          }
         },
       };
     },
@@ -6429,7 +8238,10 @@ for (const example of examples) {
         <div class="example-level">${example.step}</div>
         <h2>${example.title}</h2>
       </div>
-      ${isAdvancedLab ? `<div class="advanced-chip">GPU Lab</div>` : ""}
+      <div class="example-head-actions">
+        ${isAdvancedLab ? `<div class="advanced-chip">GPU Lab</div>` : ""}
+        <button class="example-focus-button" data-example-focus-toggle type="button" aria-expanded="false">Full screen</button>
+      </div>
     </div>
     <p class="example-summary">${example.summary}</p>
     <div class="example-viewport">
@@ -6449,6 +8261,13 @@ for (const example of examples) {
 }
 
 const exampleCards = [...document.querySelectorAll<HTMLElement>(".example-card")];
+document.querySelectorAll(".example-focus-overlay").forEach((overlay) => overlay.remove());
+document.documentElement.classList.remove("body-example-focus");
+document.body.classList.remove("body-example-focus");
+let exampleFocusOverlay: HTMLDivElement | null = null;
+let exampleFocusStage: HTMLDivElement | null = null;
+let exampleFocusLabel: HTMLElement | null = null;
+let exampleFocusCloseButton: HTMLButtonElement | null = null;
 
 const timer = new THREE.Timer();
 timer.connect(document);
@@ -6460,9 +8279,174 @@ let activeAppTab: AppTab = "gallery";
 let houseLabHandle: HouseLabHandle | null = null;
 let houseLabMounting: Promise<void> | null = null;
 let appDisposed = false;
+let focusedExampleIndex: number | null = null;
+let focusedExamplePlaceholder: Comment | null = null;
+let focusedExampleScrollY = 0;
+let exampleActivityDirty = true;
+
+const createExampleFocusOverlay = () => {
+  exampleFocusOverlay?.remove();
+  const overlay = document.createElement("div");
+  overlay.className = "example-focus-overlay";
+  overlay.innerHTML = `
+    <div class="example-focus-shell">
+      <div class="example-focus-bar">
+        <div class="example-focus-copy">
+          <span class="example-focus-kicker">Focused Demo</span>
+          <strong class="example-focus-label">Example</strong>
+        </div>
+        <button class="example-focus-close" data-example-focus-close type="button">Back to list</button>
+      </div>
+      <div class="example-focus-stage"></div>
+    </div>
+  `;
+
+  const stage = overlay.querySelector<HTMLDivElement>(".example-focus-stage");
+  const label = overlay.querySelector<HTMLElement>(".example-focus-label");
+  const closeButton = overlay.querySelector<HTMLButtonElement>("[data-example-focus-close]");
+
+  if (!stage || !label || !closeButton) {
+    throw new Error("Could not create focused example overlay");
+  }
+
+  closeButton.addEventListener("click", () => {
+    clearFocusedExample();
+  });
+
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) {
+      clearFocusedExample();
+    }
+  });
+
+  document.body.append(overlay);
+  exampleFocusOverlay = overlay;
+  exampleFocusStage = stage;
+  exampleFocusLabel = label;
+  exampleFocusCloseButton = closeButton;
+};
+
+const syncExampleFocusButton = (index: number, focused: boolean) => {
+  const button = exampleCards[index]?.querySelector<HTMLButtonElement>("[data-example-focus-toggle]");
+
+  if (!button) {
+    return;
+  }
+
+  button.textContent = focused ? "Back to list" : "Full screen";
+  button.setAttribute("aria-expanded", focused ? "true" : "false");
+};
+
+const refreshExampleActivity = () => {
+  exampleActivityDirty = false;
+
+  for (let index = 0; index < mountedExamples.length; index += 1) {
+    const mounted = mountedExamples[index];
+
+    if (!mounted) {
+      continue;
+    }
+
+    const rect = mounted.card.getBoundingClientRect();
+    mounted.isVisible = rect.bottom > 0 && rect.top < window.innerHeight;
+    mounted.isActive =
+      rect.bottom > -ACTIVE_VIEWPORT_MARGIN &&
+      rect.top < window.innerHeight + ACTIVE_VIEWPORT_MARGIN;
+  }
+};
+
+const clearFocusedExample = (restoreScroll = true) => {
+  if (focusedExampleIndex === null) {
+    return;
+  }
+
+  const index = focusedExampleIndex;
+  const card = exampleCards[index];
+  const mounted = mountedExamples[index];
+
+  card.classList.remove("example-card-focused");
+  card.removeAttribute("data-example-focused");
+  syncExampleFocusButton(index, false);
+
+  if (focusedExamplePlaceholder?.parentNode) {
+    focusedExamplePlaceholder.parentNode.replaceChild(card, focusedExamplePlaceholder);
+  }
+
+  exampleFocusOverlay?.remove();
+  exampleFocusOverlay = null;
+  exampleFocusStage = null;
+  exampleFocusLabel = null;
+  exampleFocusCloseButton = null;
+  document.documentElement.classList.remove("body-example-focus");
+  document.body.classList.remove("body-example-focus");
+  focusedExampleIndex = null;
+  focusedExamplePlaceholder = null;
+  scrollSuspendUntil = performance.now() + 120;
+
+  if (mounted) {
+    mounted.sizeDirty = true;
+    mounted.fpsSmoothed = 0;
+  }
+
+  exampleActivityDirty = true;
+
+  if (restoreScroll) {
+    const scrollTarget = focusedExampleScrollY;
+    requestAnimationFrame(() => {
+      window.scrollTo({
+        top: scrollTarget,
+      });
+    });
+  }
+};
+
+const setFocusedExample = async (index: number) => {
+  if (focusedExampleIndex === index) {
+    clearFocusedExample();
+    return;
+  }
+
+  clearFocusedExample(false);
+
+  if (!mountedExamples[index]) {
+    await ensureExampleMounted(index);
+  }
+
+  const mounted = mountedExamples[index];
+  const card = exampleCards[index];
+  const parent = card.parentNode;
+
+  if (!mounted || !parent) {
+    return;
+  }
+
+  createExampleFocusOverlay();
+
+  if (!exampleFocusStage || !exampleFocusLabel) {
+    return;
+  }
+
+  focusedExampleScrollY = window.scrollY;
+  focusedExamplePlaceholder = document.createComment(`example-focus-${index}`);
+  parent.replaceChild(focusedExamplePlaceholder, card);
+  exampleFocusStage.append(card);
+
+  focusedExampleIndex = index;
+  card.dataset.exampleFocused = "true";
+  card.classList.add("example-card-focused");
+  syncExampleFocusButton(index, true);
+  exampleFocusLabel.textContent = `${examples[index].step} • ${examples[index].title}`;
+  document.documentElement.classList.add("body-example-focus");
+  document.body.classList.add("body-example-focus");
+  mounted.sizeDirty = true;
+  mounted.fpsSmoothed = 0;
+  mounted.isActive = true;
+  mounted.isVisible = true;
+  exampleActivityDirty = true;
+  scrollSuspendUntil = performance.now() + 120;
+};
 
 const disposeMountedExample = (mounted: MountedExample) => {
-  window.removeEventListener("resize", mounted.handleWindowResize);
   mounted.guiFieldObserver.disconnect();
   mounted.cameraRig.dispose();
   mounted.controls.dispose();
@@ -6487,6 +8471,7 @@ const ensureExampleMounted = async (index: number) => {
       }
 
       mountedExamples[index] = mounted;
+      exampleActivityDirty = true;
     })
     .catch((error) => {
       const card = exampleCards[index];
@@ -6509,6 +8494,10 @@ const ensureExampleMounted = async (index: number) => {
 };
 
 const unmountExample = (index: number) => {
+  if (focusedExampleIndex === index) {
+    clearFocusedExample(false);
+  }
+
   const mounted = mountedExamples[index];
 
   if (!mounted) {
@@ -6521,6 +8510,17 @@ const unmountExample = (index: number) => {
 
 const reconcileFallbackExamples = () => {
   if (hasNativeWebGPU) {
+    return;
+  }
+
+  if (focusedExampleIndex !== null) {
+    for (let index = 0; index < mountedExamples.length; index += 1) {
+      if (index !== focusedExampleIndex) {
+        unmountExample(index);
+      }
+    }
+
+    void ensureExampleMounted(focusedExampleIndex);
     return;
   }
 
@@ -6570,6 +8570,7 @@ const syncActivePanel = () => {
   housePanel.hidden = activeAppTab !== "house";
   galleryPanel.classList.toggle("app-panel-active", activeAppTab === "gallery");
   housePanel.classList.toggle("app-panel-active", activeAppTab === "house");
+  exampleActivityDirty = true;
 };
 
 const ensureHouseLabMounted = async () => {
@@ -6609,6 +8610,10 @@ const ensureHouseLabMounted = async () => {
 };
 
 const setActiveAppTab = async (nextTab: AppTab) => {
+  if (nextTab !== "gallery" && focusedExampleIndex !== null) {
+    clearFocusedExample(false);
+  }
+
   if (activeAppTab === nextTab) {
     if (nextTab === "house") {
       await ensureHouseLabMounted();
@@ -6642,6 +8647,8 @@ const setActiveAppTab = async (nextTab: AppTab) => {
     }
   }
 
+  exampleActivityDirty = true;
+
   if (!hasNativeWebGPU) {
     reconcileFallbackExamples();
   }
@@ -6654,17 +8661,48 @@ appTabButtons.forEach((button) => {
   });
 });
 
+exampleCards.forEach((card, index) => {
+  const focusButton = card.querySelector<HTMLButtonElement>("[data-example-focus-toggle]");
+
+  focusButton?.addEventListener("click", () => {
+    void setFocusedExample(index);
+  });
+});
+
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && focusedExampleIndex !== null) {
+    event.preventDefault();
+    clearFocusedExample();
+  }
+});
+
 syncActivePanel();
 
 let renderLoopActive = true;
 let renderFrameHandle = 0;
 let scrollSuspendUntil = 0;
+let resizeSuspendUntil = 0;
 
 const handleWindowScroll = () => {
   scrollSuspendUntil = performance.now() + 140;
+  exampleActivityDirty = true;
 };
 
 window.addEventListener("scroll", handleWindowScroll, { passive: true });
+
+const markGallerySizeDirty = () => {
+  resizeSuspendUntil = performance.now() + 220;
+  exampleActivityDirty = true;
+
+  for (const mounted of mountedExamples) {
+    if (mounted) {
+      mounted.sizeDirty = true;
+      mounted.fpsSmoothed = 0;
+    }
+  }
+};
+
+window.addEventListener("resize", markGallerySizeDirty, { passive: true });
 
 const renderLoop = () => {
   if (!renderLoopActive) {
@@ -6676,15 +8714,26 @@ const renderLoop = () => {
   const elapsed = timer.getElapsed();
   const fps = delta > 0 ? THREE.MathUtils.clamp(1 / delta, 0, 240) : 0;
   const scrollSuspended = performance.now() < scrollSuspendUntil;
+  const resizeSuspended = performance.now() < resizeSuspendUntil;
   const galleryActive = activeAppTab === "gallery";
 
-  if (galleryActive && !scrollSuspended) {
+  if (galleryActive && !scrollSuspended && !resizeSuspended) {
     reconcileFallbackExamples();
+
+    if (exampleActivityDirty) {
+      refreshExampleActivity();
+    }
   }
 
   if (galleryActive) {
-    for (const mounted of mountedExamples) {
+    for (let index = 0; index < mountedExamples.length; index += 1) {
+      const mounted = mountedExamples[index];
+
       if (!mounted) {
+        continue;
+      }
+
+      if (focusedExampleIndex !== null && index !== focusedExampleIndex) {
         continue;
       }
 
@@ -6693,7 +8742,11 @@ const renderLoop = () => {
       }
 
       try {
-        if (scrollSuspended) {
+        if (scrollSuspended || resizeSuspended) {
+          continue;
+        }
+
+        if (focusedExampleIndex === null && !mounted.isActive) {
           continue;
         }
 
@@ -6706,10 +8759,7 @@ const renderLoop = () => {
         mounted.wireframeController.update();
         mounted.update?.(elapsed, delta);
 
-        const rect = mounted.host.getBoundingClientRect();
-        const visible = rect.bottom > 0 && rect.top < window.innerHeight;
-
-        if (visible) {
+        if (focusedExampleIndex === index || mounted.isVisible) {
           mounted.renderer.render(mounted.scene, mounted.camera);
         }
       } catch (error) {
@@ -6727,14 +8777,18 @@ const renderLoop = () => {
 
 renderFrameHandle = requestAnimationFrame(renderLoop);
 
-if (import.meta.hot) {
+  if (import.meta.hot) {
   import.meta.hot.dispose(() => {
     appDisposed = true;
+    clearFocusedExample(false);
     document.documentElement.classList.remove("body-house-app");
+    document.documentElement.classList.remove("body-example-focus");
     document.body.classList.remove("body-house-app");
+    document.body.classList.remove("body-example-focus");
     renderLoopActive = false;
     cancelAnimationFrame(renderFrameHandle);
     window.removeEventListener("scroll", handleWindowScroll);
+    window.removeEventListener("resize", markGallerySizeDirty);
 
     const teardownExamples = () => {
       for (const mounted of mountedExamples) {
@@ -6868,6 +8922,8 @@ async function mountExample(card: HTMLElement, example: ExampleDefinition): Prom
     fpsSmoothed: 0,
     failed: false,
     sizeDirty: false,
+    isActive: true,
+    isVisible: true,
     viewportWidth: initialWidth,
     viewportHeight: initialHeight,
     syncSize: () => {
@@ -6890,7 +8946,6 @@ async function mountExample(card: HTMLElement, example: ExampleDefinition): Prom
 
   camera.aspect = initialWidth / initialHeight;
   camera.updateProjectionMatrix();
-  window.addEventListener("resize", mounted.handleWindowResize);
 
   return mounted;
 }
